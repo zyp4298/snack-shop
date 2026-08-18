@@ -189,3 +189,15 @@ CORS_ALLOW_CREDENTIALS = True   # 允许携带 token（Cookie/Authorization 头�
 
 # 关掉自动补斜杠（避免前端无斜杠请求被 301 重定向导致 bug）
 APPEND_SLASH = False
+
+# ============ Redis 缓存配置 ============
+# 告诉 Django："所有缓存统一用 Redis，别用默认的内存缓存"
+CACHES = {
+    'default' : {
+        'BACKEND' : 'django_redis.cache.RedisCache',    # 用 django-redis 这个后端
+        'LOCATION' : 'redis://127.0.0.1:6370/1',        # Redis 地址：本机 + 6379端口 + 1号库
+        'OPTIONS' : {
+            'CLIENT_CLASS' : 'django_redis.client.DefaultClient',
+        }
+    }
+}
