@@ -195,7 +195,7 @@ APPEND_SLASH = False
 CACHES = {
     'default' : {
         'BACKEND' : 'django_redis.cache.RedisCache',    # 用 django-redis 这个后端
-        'LOCATION' : 'redis://127.0.0.1:6370/1',        # Redis 地址：本机 + 6379端口 + 1号库
+        'LOCATION' : 'redis://127.0.0.1:6379/1',        # Redis 地址：本机 + 6379端口 + 1号库
         'OPTIONS' : {
             'CLIENT_CLASS' : 'django_redis.client.DefaultClient',
         }
