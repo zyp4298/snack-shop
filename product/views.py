@@ -15,6 +15,7 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from rest_framework_simplejwt.tokens import RefreshToken
 from .pagination import CustomPagination
+from django.core.cache import cache # Django 内置缓存工具（背后就是 Redis）
 
 '''
 将DRF接入Django项目,总结起来就是以下几步:
@@ -50,6 +51,17 @@ class ProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.all()
     serializer_class = ProductSerializer
     pagination_class = CustomPagination
+
+    def list(self, request, *args, **kwargs):
+        '''商品列表带缓存：先查 Redis → 没有就查 MySQL → 写回 Redis'''
+        page = request.query_params.get('page','1')      # 当前第几页（第1页/第2页缓存分开）
+        cache_key = f'product_list_{page}'              # 便签名：product_list_1 / product_list_2
+        data = cache.get(cache_key)     # ① 先看便签板：有没有？
+        if data is not None:              # ② 有！直接返回（秒回 ⚡）
+            return Response(data)
+        response = super().list(request,*args,**kwargs) # ③ 没有 → 查 MySQL（几十毫秒）
+        cache.set(cache_key,response.data,300)  # ④ 写回便签板，300秒(5分钟)后自动过期
+        return response
 
 
 class BannerViewSet(viewsets.ModelViewSet):
