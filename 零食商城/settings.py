@@ -17,7 +17,7 @@ from pathlib import Path
 # settings.py 里的默认值会被它覆盖（比如 DEBUG、数据库密码）
 # 没有这个文件就静默跳过（本地开发可能不需要）
 try:
-    from .settings_local import *   # 尝试加载本机配置
+    from 零食商城.settings_local import *   # 尝试加载本机配置
 except ImportError:
     pass                    # 没有就算了，用默认值
 
