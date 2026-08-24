@@ -12,3 +12,5 @@ venv/
 # 在你的 .gitignore 末尾加上：
 db.sqlite3
 *.sqlite3
+
+零食商城/settings_local.py
