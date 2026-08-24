@@ -12,15 +12,6 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 from pathlib import Path
 
-# ============ 本地专属配置（settings_local.py）============
-# 每台机器自己的配置放 settings_local.py（不进 Git）
-# settings.py 里的默认值会被它覆盖（比如 DEBUG、数据库密码）
-# 没有这个文件就静默跳过（本地开发可能不需要）
-try:
-    from 零食商城.settings_local import *   # 尝试加载本机配置
-except ImportError:
-    pass                    # 没有就算了，用默认值
-
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -211,3 +202,12 @@ CACHES = {
         }
     }
 }
+
+# ============ 本地专属配置（settings_local.py）============
+# 每台机器自己的配置放 settings_local.py（不进 Git）
+# settings.py 里的默认值会被它覆盖（比如 DEBUG、数据库密码）
+# 没有这个文件就静默跳过（本地开发可能不需要）
+try:
+    from 零食商城.settings_local import *   # 尝试加载本机配置
+except ImportError:
+    pass                    # 没有就算了，用默认值
