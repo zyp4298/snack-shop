@@ -41,15 +41,16 @@ urlpatterns = [
     path('login',views.LoginView.as_view(),name='token_obtain_pair'),   # 登录（2026-08-09 注释，改回 simplejwt）
     # path('login',TokenObtainPairView.as_view(),name='token_obtain_pair'),   # 登录（simplejwt 自带）
     path('refresh',TokenRefreshView.as_view(),name='token_refresh'),        # 续签
-    path('register/',views.RegisterView.as_view(),name='register'),         # 注册
+    path('register',views.RegisterView.as_view(),name='register'),         # 注册
     path('snack/category/list',views.CategoryViewSet.as_view({'get':'list'})),
     path('snack/product/list',views.ProductViewSet.as_view({'get':'list'})),
     path('snack/banner/list', views.BannerViewSet.as_view({'get': 'list'})),
     path('snack/cart/list', views.CartViewSet.as_view({'get': 'list'})),
     path('snack/cart/selectMyCartList', views.CartViewSet.as_view({'get': 'selectMyCartList'})),
-    path('snack/cart/addProductToCart/<int:product_id>/',views.CartViewSet.as_view({'put':'addProductToCart'})),
-    path('snack/cart/increaseQuantity/<int:cart_id>/',views.CartViewSet.as_view({'put':'increaseQuantity'})),
-    path('snack/cart/reduceQuantity/<int:cart_id>/',views.CartViewSet.as_view({'put':'reduceQuantity'})),
+    path('snack/cart/addProductToCart/<int:product_id>',views.CartViewSet.as_view({'put':'addProductToCart'})),
+    path('snack/cart/increaseQuantity/<int:cart_id>',views.CartViewSet.as_view({'put':'increaseQuantity'})),
+    path('snack/cart/reduceQuantity/<int:cart_id>',views.CartViewSet.as_view({'put':'reduceQuantity'})),
+    path('snack/address',views.AddressViewSet.as_view({'get': 'list'})),
     path('snack/address/list', views.AddressViewSet.as_view({'get': 'list'})),
     path('snack/address/selectMyAddressList',views.AddressViewSet.as_view({'get':'selectMyAddressList'})),
     path('snack/order/list', views.OrderViewSet.as_view({'get': 'list'})),

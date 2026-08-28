@@ -36,10 +36,11 @@ class CartSerializer(serializers.ModelSerializer):
     price = serializers.DecimalField(source='product.price', max_digits=10, decimal_places=2, read_only=True)  # ← 加：别名
     description = serializers.CharField(source='product.description', read_only=True)  # ← 加：别名
     userName = serializers.CharField(source='user.username',read_only=True)
+    cartId = serializers.IntegerField(source='id', read_only=True)  # ← 加这行：购物车ID别名（小程序前端要 cartId）
     class Meta:
         model = Cart
         fields = ['id', 'productId', 'productName', 'name', 'productImage', 'image',
-                  'productPrice', 'price', 'description', 'quantity', 'userName']
+                  'productPrice', 'price', 'description', 'quantity', 'userName','cartId']
 
 class AddressSerializer(serializers.ModelSerializer):
     userName = serializers.CharField(source='user.username',read_only=True)
