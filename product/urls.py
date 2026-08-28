@@ -50,10 +50,12 @@ urlpatterns = [
     path('snack/cart/addProductToCart/<int:product_id>',views.CartViewSet.as_view({'put':'addProductToCart'})),
     path('snack/cart/increaseQuantity/<int:cart_id>',views.CartViewSet.as_view({'put':'increaseQuantity'})),
     path('snack/cart/reduceQuantity/<int:cart_id>',views.CartViewSet.as_view({'put':'reduceQuantity'})),
-    path('snack/address',views.AddressViewSet.as_view({'get': 'list'})),
+    path('snack/address',views.AddressViewSet.as_view({'get': 'list','post': 'create'})),
     path('snack/address/list', views.AddressViewSet.as_view({'get': 'list'})),
     path('snack/address/selectMyAddressList',views.AddressViewSet.as_view({'get':'selectMyAddressList'})),
     path('snack/order/list', views.OrderViewSet.as_view({'get': 'list'})),
+    path('snack/order/selectMyOrderList', views.OrderViewSet.as_view({'get':'selectMyOrderList'})),  # ← 新增：2026-08-28 修复 404
+    path('snack/order', views.OrderViewSet.as_view({'post': 'create'})),  # ← 新增：APPEND_SLASH=False 下需要手动挂 POST
     path('home/page/selectDataInfo', views.HomePageView.as_view()),
     path('home/page/selectCategoryChart', views.HomePageView.as_view()),
     path('home/page/selectOrderStatusCount', views.HomePageView.as_view()),

@@ -16,6 +16,8 @@ from django.contrib.auth.models import User
 from rest_framework_simplejwt.tokens import RefreshToken
 from .pagination import CustomPagination
 from django.core.cache import cache # Django 内置缓存工具（背后就是 Redis）
+import time
+import uuid
 
 '''
 将DRF接入Django项目,总结起来就是以下几步:
@@ -129,6 +131,9 @@ class AddressViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return Address.objects.filter(user=self.request.user)
 
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)  # ← 新增：注入登录用户
+
     @action(detail=False, methods=['get'])
     def selectMyAddressList(self, request):
         addresses = Address.objects.filter(user=request.user)
@@ -150,6 +155,12 @@ class OrderViewSet(viewsets.ModelViewSet):
         orders = Order.objects.filter(user=request.user)
         serializer = OrderSerializer(orders, many=True)
         return Response({'code': 200, 'data': serializer.data})
+
+    def perform_create(self, serializer):
+        # 生成订单号：OR + 时间戳（主键不能为空，后端生成）
+        order_id = 'OR' + time.strftime('%Y%m%d%H%M%S') + str(uuid.uuid4().int % 10000).zfill(4)
+        # 绑定当前登录用户 + 订单号
+        serializer.save(order_id=order_id, user=self.request.user)
 
 
 # class OrderProductViewSet(viewsets.ModelViewSet):
@@ -189,10 +200,11 @@ class RegisterView(APIView):
         # 自动发 token（注册即登录）
         refresh = RefreshToken.for_user(user)
         return Response({
+            'code':200,
             'msg': '注册成功',
             'access': str(refresh.access_token),
             'refresh': str(refresh),
-        }, status=status.HTTP_201_CREATED)
+        }, status=status.HTTP_200_OK)
 
 
 # 首页统计接口（合同清单 B 组）

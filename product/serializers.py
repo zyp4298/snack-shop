@@ -44,10 +44,14 @@ class CartSerializer(serializers.ModelSerializer):
 
 class AddressSerializer(serializers.ModelSerializer):
     userName = serializers.CharField(source='user.username',read_only=True)
-    isDefault = serializers.BooleanField(source='is_default',read_only=True)
+    isDefault = serializers.BooleanField(source='is_default')
+    addressId = serializers.IntegerField(source='id', read_only=True)
     class Meta:
         model = Address
-        fields = ['id', 'userName', 'name', 'phone', 'detail', 'isDefault', 'create_time']
+        fields = ['id', 'userName', 'name', 'phone', 'detail', 'isDefault', 'create_time','addressId']
+        extra_kwargs = {
+            'user': {'read_only': True},  # ← 新增：user 不参与写入
+        }
 
 '''
 力度 1：只要 ID（最省事）
@@ -85,12 +89,29 @@ class OrderProductSerializer(serializers.ModelSerializer):
 class OrderSerializer(serializers.ModelSerializer):
     products = OrderProductSerializer(many=True,read_only=True)
     orderId = serializers.CharField(source='order_id',read_only=True)
-    totalAmount = serializers.DecimalField(source='total_amount',max_digits=10,decimal_places=2,read_only=True)
-    productCount = serializers.IntegerField(source='product_count', read_only=True)
+    totalAmount = serializers.DecimalField(source='total_amount',max_digits=10,decimal_places=2)
+    productCount = serializers.IntegerField(source='product_count')
     userName = serializers.CharField(source='user.username', read_only=True)
+    orderProductsList = OrderProductSerializer(many=True, write_only=True, required=False)  # ← 新增 class Meta:
 
     class Meta:
         model = Order
         fields = ['orderId', 'userName', 'name', 'phone', 'address', 'totalAmount', 'productCount', 'status', 'remark',
-                  'create_time', 'products']
+                  'create_time', 'products','orderProductsList']
+        extra_kwargs = {
+            'user': {'read_only': True},  # ← 新增：user 由 perform_create 注入
+        }
+
+    # ===== 虎鲸 2026-08-28：重写 create，处理 orderProductsList 嵌套写入 =====
+    # ⚠️ 注意：create 必须在 class Meta 外面，与 orderProductsList 同级（4空格缩进）！
+    def create(self, validated_data):
+        # 1. 弹出订单商品列表（前端发的明细，不能传给 Order.objects.create）
+        products_data = validated_data.pop('orderProductsList', [])
+        # 2. 创建订单（order_id / user 已由 perform_create 注入）
+        order = Order.objects.create(**validated_data)
+        # 3. 批量写入订单明细表
+        for item in products_data:
+            item.pop('cartId', None)  # OrderProduct 模型没有 cartId 字段，忽略它
+            OrderProduct.objects.create(order=order, **item)
+        return order
 
