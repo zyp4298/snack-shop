@@ -362,15 +362,15 @@ class LoginView(APIView):
         })
 
 # ============ 支付宝支付（沙箱）============
-from alipay import Alipay
+from alipay import AliPay
 from django.conf import settings
 
 def get_alipay():
     '''创建支付宝客户端（沙箱模式）'''
-    return Alipay(
+    return AliPay(
         appid=settings.ALIPAY_APPID,                    # 沙箱 APPID
         app_notify_url=None,
-        app_private_key_string=settings.ALIPAY_APPID_PRIVATE_KEY,  # 应用私钥（签名用）
+        app_private_key_string=settings.ALIPAY_APP_PRIVATE_KEY,  # 应用私钥（签名用）
         alipay_public_key_string=settings.ALIPAY_PUBLIC_KEY,        # 支付宝公钥（验签用）
         sign_type='RSA2',                                            # 签名算法
         debug=True,                                                  # True=沙箱 False=正式
@@ -396,8 +396,8 @@ class PayView(APIView):
             return_url='http://127.0.0.1:8000/pay/result',               # 付款后跳回页面（本地先用）
             notify_url='http://127.0.0.1:8000/snack/pay/callback',      # 异步回调（下面这个接口）
         )
-        # 3. 拼完整链接：沙箱网关 + 参数
-        pay_url = 'https://openapi.alipaydev.com/gateway.do?' + order_string
+        # 3. 拼完整链接：沙箱网关 + 参数（用 SDK 自带的网关，debug=True 自动选沙箱地址）
+        pay_url = alipay._gateway + '?' + order_string
         return Response({'code':200,'pay_url':pay_url})
 
 class  PayCallbackView(APIView):

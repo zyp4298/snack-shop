@@ -213,7 +213,3 @@ except ImportError:
     pass                    # 没有就算了，用默认值
 
 
-# # ============ 支付宝沙箱配置（申请好沙箱后填）============
-# ALIPAY_APPID = '你的APPID'                  # 沙箱应用的 APPID（一串数字）
-# ALIPAY_APP_PRIVATE_KEY = '''你的应用私钥'''    # 平台生成/自己生成的私钥
-# ALIPAY_PUBLIC_KEY = '''支付宝公钥'''          # 平台给的公钥
