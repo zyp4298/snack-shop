@@ -162,6 +162,11 @@ class OrderViewSet(viewsets.ModelViewSet):
         # 绑定当前登录用户 + 订单号
         serializer.save(order_id=order_id, user=self.request.user)
 
+    # 虎鲸 2026-08-29：让 PUT 接受部分字段（前端只发改的 status）
+    def update(self, request, *args, **kwargs):
+        kwargs['partial'] = True
+        return super().update(request, *args, **kwargs)
+
 
 # class OrderProductViewSet(viewsets.ModelViewSet):
 #     queryset = OrderProduct.objects.all()
@@ -278,6 +283,23 @@ class UserInfoView(APIView):
             'permissions': [],
         })
 
+# ===== 虎鲸 2026-08-29：修改密码功能（Django 自带密码三件套）=====
+class UpdatePwdView(APIView):
+    permission_classes = [IsAuthenticated]
+    def put(self,request):
+        user = request.user
+        old_password = request.data.get('oldPassword')
+        new_password = request.data.get('newPassword')
+
+        # 1. 验证旧密码
+        if not user.check_password(old_password):
+            return Response({'msg':'旧密码不正确'},status=status.HTTP_400_BAD_REQUEST)
+
+        # 2. 设置新密码（自动加密存储）
+        user.set_password(new_password)
+        user.save()
+
+        return Response({'msg': '密码修改成功'})
 
 # 简单返回
 class LogoutView(APIView):
@@ -338,3 +360,57 @@ class LoginView(APIView):
             'access': str(refresh.access_token),  # 兼容（以后可能用）
             'refresh': str(refresh),
         })
+
+# ============ 支付宝支付（沙箱）============
+from alipay import Alipay
+from django.conf import settings
+
+def get_alipay():
+    '''创建支付宝客户端（沙箱模式）'''
+    return Alipay(
+        appid=settings.ALIPAY_APPID,                    # 沙箱 APPID
+        app_notify_url=None,
+        app_private_key_string=settings.ALIPAY_APPID_PRIVATE_KEY,  # 应用私钥（签名用）
+        alipay_public_key_string=settings.ALIPAY_PUBLIC_KEY,        # 支付宝公钥（验签用）
+        sign_type='RSA2',                                            # 签名算法
+        debug=True,                                                  # True=沙箱 False=正式
+    )
+
+class PayView(APIView):
+    '''① 生成支付链接：POST /snack/pay  body: {"order_id": "xxx"}'''
+    permission_classes = [IsAuthenticated]
+
+    def post(self,request):
+        # 1. 查订单（必须是自己的）
+        order_id = request.data.get('order_id')
+        order = Order.objects.filter(order_id=order_id,user=request.user).first()
+        if not order:
+            return Response({'code':500,'msg':'订单不存在'})
+
+        # 2. SDK 生成支付参数（相当于把订单信息"盖章"）
+        alipay = get_alipay()
+        order_string = alipay.api_alipay_trade_page_pay(
+            out_trade_no=order_id,                                      # 商户订单号（你的 order_id）
+            total_amount=str(order.total_amount),                        # 金额（字符串！）
+            subject='零食商城订单',                                        # 商品标题
+            return_url='http://127.0.0.1:8000/pay/result',               # 付款后跳回页面（本地先用）
+            notify_url='http://127.0.0.1:8000/snack/pay/callback',      # 异步回调（下面这个接口）
+        )
+        # 3. 拼完整链接：沙箱网关 + 参数
+        pay_url = 'https://openapi.alipaydev.com/gateway.do?' + order_string
+        return Response({'code':200,'pay_url':pay_url})
+
+class  PayCallbackView(APIView):
+    '''② 支付回调：POST /snack/pay/callback（支付宝自动来调）'''
+    def post(self,request):
+        alipay = get_alipay()
+        # 1. 支付宝发来的数据 + 签名
+        data = request.data.dict()
+        signature = data.pop('sign','')
+        # 2. 验证签名（防伪造：确认真是支付宝发的）
+        if alipay.verify(data,signature) and data.get('trade_status') == 'TRADE_SUCCESS':
+            # 3. 签名通过 + 支付成功 → 更新订单状态
+            order_id = data.get('out_trade_no')
+            Order.objects.filter(order_id=order_id).update(status='已支付')
+            return Response('success')      # ⚠️ 必须返回 success，否则支付宝反复重发
+        return Response('fail')

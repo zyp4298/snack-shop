@@ -115,3 +115,20 @@ class OrderSerializer(serializers.ModelSerializer):
             OrderProduct.objects.create(order=order, **item)
         return order
 
+    def update(self, instance, validated_data):
+        # 1. 弹出非模型字段（前端可能误传 orderProductsList）
+        validated_data.pop('orderProductsList', None)
+        # 2. 手动应用字段（DRF validated_data key 是 DRF 字段名如 totalAmount，
+        #    需要通过 self.fields[field].source 转成模型字段名 total_amount 才能 setattr）
+        for drf_name, value in validated_data.items():
+            field = self.fields.get(drf_name)
+            # 优先用 source 映射到模型字段名；没有 source 就用 drf_name
+            if field and isinstance(field.source, str):
+                attr = field.source
+            else:
+                attr = drf_name
+            setattr(instance, attr, value)
+        # 3. 保存
+        instance.save()
+        return instance
+

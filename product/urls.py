@@ -70,9 +70,13 @@ urlpatterns = [
     path('snack/order/<str:order_id>', views.OrderViewSet.as_view({'get':'retrieve', 'put':'update', 'delete':'destroy'})),
     # ------------------------------------------------------------------------------------------
     path('captchaImage',views.CaptchaView.as_view(),name='captcha'),        # 验证码（已注释）
+    path('system/user/profile/updatePwd', views.UpdatePwdView.as_view()),   # ← 新增：修改密码
     path('getInfo', views.UserInfoView.as_view()),      # 登录后返回用户信息（已注释）
     path('logout', views.LogoutView.as_view()),         # 退出（已注释）
     path('getRouters', views.RoutersView.as_view()),        # 菜单（已注释）
+
+    path('snack/pay', views.PayView.as_view()),                       # 生成支付链接
+    path('snack/pay/callback', views.PayCallbackView.as_view()),      # 支付回调
 
 ]
 
