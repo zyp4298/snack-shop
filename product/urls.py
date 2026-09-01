@@ -69,7 +69,8 @@ urlpatterns = [
     path('snack/address/<int:pk>', views.AddressViewSet.as_view({'get':'retrieve', 'put':'update', 'delete':'destroy'})),
     path('snack/order/<str:order_id>', views.OrderViewSet.as_view({'get':'retrieve', 'put':'update', 'delete':'destroy'})),
     # ------------------------------------------------------------------------------------------
-    path('captchaImage',views.CaptchaView.as_view(),name='captcha'),        # 验证码（已注释）
+    # ===== 验证码相关（2026-09-01 船长要求：不启用验证码，整段注释）=====
+    # path('captchaImage',views.CaptchaView.as_view(),name='captcha'),        # 验证码（已注释）
     path('system/user/profile/updatePwd', views.UpdatePwdView.as_view()),   # ← 新增：修改密码
     path('getInfo', views.UserInfoView.as_view()),      # 登录后返回用户信息（已注释）
     path('logout', views.LogoutView.as_view()),         # 退出（已注释）

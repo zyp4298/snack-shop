@@ -255,14 +255,15 @@ class CategoryNameListView(APIView):
 # 以后要继续联调时，取消注释即可
 # ============================================================
 
+# ===== 验证码相关（2026-09-01 船长要求：不启用验证码，整段注释）=====
 # 验证码接口（返回 captchaEnabled=false 表示不需要验证码）
-class CaptchaView(APIView):
-    def get(self, request):
-        return Response({
-            'captchaEnabled': False,  # 前端看到 false → 不显示验证码
-            'uuid': '',  # 留空
-            'img': '',  # 留空
-        })
+# class CaptchaView(APIView):
+#     def get(self, request):
+#         return Response({
+#             'captchaEnabled': False,  # 前端看到 false → 不显示验证码
+#             'uuid': '',  # 留空
+#             'img': '',  # 留空
+#         })
 
 
 # 获取登录用户信息
