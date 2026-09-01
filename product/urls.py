@@ -78,6 +78,7 @@ urlpatterns = [
 
     path('snack/pay', views.PayView.as_view()),                       # 生成支付链接
     path('snack/pay/callback', views.PayCallbackView.as_view()),      # 支付回调
+    path('pay/result', views.PayResultView.as_view(), name='pay_result'), # 支付成功跳转页
 
 ]
 

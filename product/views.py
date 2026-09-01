@@ -415,3 +415,24 @@ class  PayCallbackView(APIView):
             Order.objects.filter(order_id=order_id).update(status='已支付')
             return Response('success')      # ⚠️ 必须返回 success，否则支付宝反复重发
         return Response('fail')
+
+from django.http import HttpResponse
+
+class PayResultView(APIView):
+    '''支付宝支付成功后跳回的页面（用户浏览器看到的"支付成功"页）'''
+    permission_classes = [] # 不需要登录（浏览器从支付宝跳转过来没 token）
+    authentication_classes = []  # 同上
+
+    def get(self, request):
+        # 简单 HTML页面，显示支付成功
+        #真实生产里通常跳到"我的订单"页，这里做个简单的提示页
+        return HttpResponse('''
+            <html>
+            <head><meta charset="utf-8"><title>支付成功</title></head>
+            <body style="text-align:center;padding-top:100px;font-family:sans-serif">
+                <h1 style="color:#52c41a">✅ 支付成功！</h1>
+                <p>订单支付已完成，可以关闭此页面了。</p>
+                <p style="color:#999;font-size:14px">真实订单状态已通过异步通知更新</p>
+            </body>
+            </html>
+        ''', content_type='text/html; charset=utf-8')
