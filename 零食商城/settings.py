@@ -164,6 +164,7 @@ JWT 配置步骤（本次项目实操记录）:
 # ============ JWT 配置 ============
 # 告诉 DRF："接口验证身份时用 JWT"
 REST_FRAMEWORK = {
+    'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],  # ← 加这行
     'DEFAULT_AUTHENTICATION_CLASSES':[
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
