@@ -186,11 +186,11 @@ class RecommendationView(APIView):
         })
 
 class ProductSearchView(APIView):
-    '''
-    我知道这是APIView，属于手动views，因此没有自动设置方法，我便要手动添加get方法，那么数据便是来自数据库的Product的数据，查询条件是请求的数据。
-    翻译器就用productserializer翻译，翻译的数据就是刚才请求的数据，并且是多量数据。返回值，首先因为是自定义的，因此得手动返回需要的内容，code是
-    业务状态码，msg是提示信息，rows其实就是data？或者说data.list？这里不太理解，total就是返回多少条目，说实话我觉得可以去除掉，似乎没什么作用
-    '''
+
+    # 我知道这是APIView，属于手动views，因此没有自动设置方法，我便要手动添加get方法，那么数据便是来自数据库的Product的数据，查询条件是请求的数据。
+    # 翻译器就用productserializer翻译，翻译的数据就是刚才请求的数据，并且是多量数据。返回值，首先因为是自定义的，因此得手动返回需要的内容，code是
+    # 业务状态码，msg是提示信息，rows其实就是data？或者说data.list？这里不太理解，total就是返回多少条目，说实话我觉得可以去除掉，似乎没什么作用
+
     def get(self,request):
         keyword = request.query_params.get('keyword','')            #不理解的地方，我知道要请求的是搜索的数据，但为什么这么写？
         products = Product.objects.filter(name__icontains=keyword)      #数据来源，但name__icontains是什么我忘了，这些__都是什么我都忘了，记得给我说说
