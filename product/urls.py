@@ -61,6 +61,7 @@ urlpatterns = [
     path('home/page/selectOrderStatusCount', views.HomePageView.as_view()),
     path('snack/category/selectAllCategoryNameList',views.CategoryNameListView.as_view()),
     path('snack/recommendation/advanced',views.RecommendationView.as_view()),
+    path('snack/product/search',views.ProductSearchView.as_view()),
     # ====== 详情路由（无斜杠版，匹配小程序前端调用）======
     path('snack/product/<int:pk>', views.ProductViewSet.as_view({'get':'retrieve', 'put':'update', 'delete':'destroy'})),
     path('snack/category/<int:pk>', views.CategoryViewSet.as_view({'get':'retrieve', 'put':'update', 'delete':'destroy'})),

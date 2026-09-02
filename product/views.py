@@ -185,6 +185,24 @@ class RecommendationView(APIView):
             'total':len(serializer.data)
         })
 
+class ProductSearchView(APIView):
+    '''
+    我知道这是APIView，属于手动views，因此没有自动设置方法，我便要手动添加get方法，那么数据便是来自数据库的Product的数据，查询条件是请求的数据。
+    翻译器就用productserializer翻译，翻译的数据就是刚才请求的数据，并且是多量数据。返回值，首先因为是自定义的，因此得手动返回需要的内容，code是
+    业务状态码，msg是提示信息，rows其实就是data？或者说data.list？这里不太理解，total就是返回多少条目，说实话我觉得可以去除掉，似乎没什么作用
+    '''
+    def get(self,request):
+        keyword = request.query_params.get('keyword','')            #不理解的地方，我知道要请求的是搜索的数据，但为什么这么写？
+        products = Product.objects.filter(name__icontains=keyword)      #数据来源，但name__icontains是什么我忘了，这些__都是什么我都忘了，记得给我说说
+        serializer = ProductSerializer(products,many=True)
+        return Response({
+            'code':200,
+            'msg':'查询成功',
+            'rows':serializer.data,
+            'total':len(serializer.data),           #这行我认为没必要，毕竟翻译的数据长度还是那么长，因此返回的条目还是总共的
+        })
+
+
 # 注册接口
 class RegisterView(APIView):
     def post(self, request):
@@ -394,8 +412,8 @@ class PayView(APIView):
             out_trade_no=order_id,                                      # 商户订单号（你的 order_id）
             total_amount=str(order.total_amount),                        # 金额（字符串！）
             subject='零食商城订单',                                        # 商品标题
-            return_url='http://127.0.0.1:8000/pay/result',               # 付款后跳回页面（本地先用）
-            notify_url='http://127.0.0.1:8000/snack/pay/callback',      # 异步回调（下面这个接口）
+            return_url='http://116.62.205.54/pay/result',               # 付款后跳回页面（本地先用）
+            notify_url='http://116.62.205.54/snack/pay/callback',      # 异步回调（下面这个接口）
         )
         # 3. 拼完整链接：沙箱网关 + 参数（用 SDK 自带的网关，debug=True 自动选沙箱地址）
         pay_url = alipay._gateway + '?' + order_string
