@@ -123,6 +123,22 @@ class CartViewSet(viewsets.ModelViewSet):
             cart_item.save()
         return Response({'code':200,'msg':'数量-1'})
 
+    # 虎鲸 2026-09-03：批量删除购物车（兼容前端 delCart([5,7]) → /snack/cart/5,7）
+    # 原因：下单成功后，前端 confirm.vue 第 312 行 delCart(cartIds) 传数组 → URL = /snack/cart/5,7
+    #      DRF 默认 detail 路由会进 destroy，但 pk='5,7' 是字符串，无法 cart_item = Cart.objects.get(pk=pk) → 报错 500
+    #      解决方案：判断 pk 含逗号 → 拆成 ID 列表 → filter + delete
+    def destroy(self, request, *args, **kwargs):
+        pk = kwargs.get('pk', '')
+        if ',' in str(pk):
+            # 逗号分隔的多个 ID：批量删除
+            ids = [int(i) for i in str(pk).split(',') if i.isdigit()]
+            # 只删当前用户的（安全：防止删别人数据）
+            deleted_count, _ = Cart.objects.filter(id__in=ids, user=request.user).delete()
+            return Response({'code': 200, 'msg': f'已删除 {deleted_count} 条'})
+        # 单个 ID：走默认逻辑（ModelViewSet.destroy → get_object → perform_destroy）
+        return super().destroy(request, *args, **kwargs)
+
+
 class AddressViewSet(viewsets.ModelViewSet):
     queryset = Address.objects.all()
     serializer_class = AddressSerializer

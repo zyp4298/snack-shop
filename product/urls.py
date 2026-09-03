@@ -66,7 +66,7 @@ urlpatterns = [
     path('snack/product/<int:pk>', views.ProductViewSet.as_view({'get':'retrieve', 'put':'update', 'delete':'destroy'})),
     path('snack/category/<int:pk>', views.CategoryViewSet.as_view({'get':'retrieve', 'put':'update', 'delete':'destroy'})),
     path('snack/banner/<int:pk>', views.BannerViewSet.as_view({'get':'retrieve', 'put':'update', 'delete':'destroy'})),
-    path('snack/cart/<int:pk>', views.CartViewSet.as_view({'get':'retrieve', 'put':'update', 'delete':'destroy'})),
+    path('snack/cart/<str:pk>', views.CartViewSet.as_view({'get':'retrieve', 'put':'update', 'delete':'destroy'})),
     path('snack/address/<int:pk>', views.AddressViewSet.as_view({'get':'retrieve', 'put':'update', 'delete':'destroy'})),
     path('snack/order/<str:order_id>', views.OrderViewSet.as_view({'get':'retrieve', 'put':'update', 'delete':'destroy'})),
     # ------------------------------------------------------------------------------------------
