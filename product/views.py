@@ -346,6 +346,8 @@ class RoutersView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        if not request.user.is_staff:
+            return Response({'code': 200, 'msg': '操作成功', 'data': []})
         # 简单版：返回一个固定的菜单树（实际项目应该按角色动态返回）
         return Response({
             'code': 200,
