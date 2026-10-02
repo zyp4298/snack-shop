@@ -18,6 +18,7 @@ from .pagination import CustomPagination
 from django.core.cache import cache # Django 内置缓存工具（背后就是 Redis）
 import time
 import uuid
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
 
 '''
 将DRF接入Django项目,总结起来就是以下几步:
@@ -48,6 +49,13 @@ class CategoryViewSet(viewsets.ModelViewSet):
     '''给 CategoryViewSet 加分页 + 对齐 list'''
     pagination_class = CustomPagination  # 列表自动变成 {code, rows, total}
 
+    def get_permissions(self):
+        # 读（列表/详情）→ 公开，小程序要浏览
+        if self.action in ('list','retrieve'):
+            return []
+        # 写（增/删/改）→ 只有管理员
+        return [IsAdminUser()]
+
 
 class ProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.all()
@@ -65,10 +73,20 @@ class ProductViewSet(viewsets.ModelViewSet):
         cache.set(cache_key,response.data,300)  # ④ 写回便签板，300秒(5分钟)后自动过期
         return response
 
+    def get_permissions(self):
+        if self.action in ('list','retrieve'):
+            return []
+        return [IsAdminUser()]
+
 
 class BannerViewSet(viewsets.ModelViewSet):
     queryset = Banner.objects.all()
     serializer_class = BannerSerializer
+
+    def get_permissions(self):
+        if self.action in ('list','retrieve'):
+            return []
+        return [IsAdminUser()]
 
 '''要看数据 → 用 Serializer      只是做动作 → 不用'''
 class CartViewSet(viewsets.ModelViewSet):
@@ -81,6 +99,8 @@ class CartViewSet(viewsets.ModelViewSet):
     '''get_queryset(self)   	重写数据来源方法，用 self.request.user 过滤'''
 
     def get_queryset(self):
+        if self.request.user.is_staff:
+            return Cart.objects.all()
         # 只返回当前用户(request.user)的购物车
         return Cart.objects.filter(user=self.request.user)
     @action(detail=False, methods=['get'])  # 如果设为 detail=True，URL 就会变成 /carts/1/selectMyCartList/
@@ -145,6 +165,8 @@ class AddressViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        if self.request.user.is_staff:
+            return Address.objects.all()
         return Address.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
@@ -165,6 +187,8 @@ class OrderViewSet(viewsets.ModelViewSet):
     lookup_field = 'order_id'        # Order 主键是 order_id，不是默认的 id
 
     def get_queryset(self):
+        if self.request.user.is_staff:
+            return Order.objects.all()
         return Order.objects.filter(user=self.request.user)
     @action(detail=False, methods=['get'])
     def selectMyOrderList(self, request):
