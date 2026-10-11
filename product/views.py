@@ -496,3 +496,63 @@ class PayResultView(APIView):
             </body>
             </html>
         ''', content_type='text/html; charset=utf-8')
+
+# ===== 2026-10-11：适配若依管理端模板的"系统类"接口 =====
+# 背景：管理端前端是若依(Vue3)模板，它会调两个系统接口，而 Django 从来没有这两条路由 →
+#       一直 404 → 页面顶部弹"系统接口404异常"。
+# 下面两个类是它们的适配层：前端一行不改，只补后端。
+
+# 字典数据表：键 = 字典类型，值 = 若依格式的选项列表
+# ⚠️ 字段名是固定的（前端 utils/dict.js 里写死这么取）：
+#    dictLabel=显示文字 / dictValue=实际值 / listClass=标签颜色 / cssClass=自定义样式
+
+DICT_DATA = {
+    'order_status':[
+        {'dictLabel':'待收货','dictValue':'待收货','listClass':'primary','cssClass':''},
+        {'dictLabel':'已支付','dictValue':'已支付','listClass':'success','cssClass':''},
+        {'dictLabel':'已完成','dictValue':'已完成','listClass':'primary','cssClass':''},
+        {'dictLabel':'已取消','dictValue':'已取消','listClass':'info','cssClass':''},
+    ]
+}
+
+class SysDictDataView(APIView):
+    '''
+        若依模板的字典接口：GET /system/dict/data/type/<字典类型>
+        前端的 useDict('order_status') 会调它，把每项转成 {label, value} 给下拉框和表格标签用。
+        ⚠️ dictValue 必须和数据库里存的值一致 —— 本项目的 Order.status 存的是「中文」，
+           所以这里 value 也用中文；若改成数字码，表格里的订单状态列会显示不出来。
+    '''
+    permission_classes = [IsAuthenticated]
+
+    def get(self,request,dict_type:str):
+        return Response({
+            'code':200,
+            'msg':'操作成功',
+            'data':DICT_DATA.get(dict_type,[]),     # 没配的类型返回空列表（不是 404）  查不到 → 返回 []  → 接口正常返回空数据 ✅
+        })
+
+class SysUserInfoView(APIView):
+    '''若依模板的"当前用户信息"接口：GET /system/user/
+        管理端顶部导航栏（Navbar.vue）每次渲染都会调一次 —— 但它的返回值其实没被使用
+        （模板里遗留的调用），补上这个接口是为了消掉 404 红条。
+    '''
+    permission_classes = [IsAuthenticated]
+
+    def get(self,request):
+        user = request.user
+        return Response({
+            'code':200,
+            'msg':'操作成功',
+            'data':{
+                'userId':user.id,
+                'userName':user.username,
+                'nickName':user.username,
+                'email': user.email or '',
+                'phonenumber': '',
+                'sex': '0',
+                'avatar': '',
+                'status': '0',
+            },
+            'roles':['admin'] if user.is_staff else [],
+            'permissions':[],
+        })

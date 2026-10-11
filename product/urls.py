@@ -81,5 +81,9 @@ urlpatterns = [
     path('snack/pay/callback', views.PayCallbackView.as_view()),      # 支付回调
     path('pay/result', views.PayResultView.as_view(), name='pay_result'), # 支付成功跳转页
 
+    # ===== 若依管理端模板兼容接口（2026-10-11 新增）=====
+    path('system/dict/data/type/<str:dict_type>',views.SysDictDataView.as_view()),
+    path('system/user/',views.SysUserInfoView.as_view()),
+
 ]
 
