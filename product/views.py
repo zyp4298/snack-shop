@@ -19,6 +19,8 @@ from django.core.cache import cache # Django 内置缓存工具（背后就是 R
 import time
 import uuid
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
+import requests
+from django.conf import settings
 
 '''
 将DRF接入Django项目,总结起来就是以下几步:
@@ -64,8 +66,11 @@ class ProductViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         '''商品列表带缓存：先查 Redis → 没有就查 MySQL → 写回 Redis'''
-        page = request.query_params.get('page','1')      # 当前第几页（第1页/第2页缓存分开）
-        cache_key = f'product_list_{page}'              # 便签名：product_list_1 / product_list_2
+        # 2026-10-14 修：参数名必须是 pageNum（和 CustomPagination 里的 page_query_param 一致）
+        # 原来写 'page' 取不到值 → 永远返回 '1' → 所有页码共用同一个缓存 key → 翻页永远是第一页
+        page = request.query_params.get('pageNum','1')      # 当前第几页（第1页/第2页缓存分开）
+        page_size = request.query_params.get('pageSize', '10')
+        cache_key = f'product_list_{page}_{page_size}'  # 顺便把 pageSize 也纳入 key   # 便签名：product_list_1 / product_list_2
         data = cache.get(cache_key)     # ① 先看便签板：有没有？
         if data is not None:              # ② 有！直接返回（秒回 ⚡）
             return Response(data)
@@ -338,8 +343,11 @@ class UserInfoView(APIView):
                 'nickName': user.username,
                 'avatar': '',
             },
-            'roles': ['admin'] if user.is_superuser else ['common'],
-            'permissions': [],
+            'roles': ['admin'] if user.is_staff else ['common'],
+            # 2026-10-14 修：permissions 不能为空！
+            # 前端按钮全都挂着 v-hasPermi="['snack:product:edit']" 这类指令，
+            # 空数组 ⇒ 按钮被整个移除（操作列一片空白）。'*:*:*' 是若依给超级管理员的通配符。
+            'permissions': ['*:*:*'] if user.is_staff else [],
         })
 
 # ===== 虎鲸 2026-08-29：修改密码功能（Django 自带密码三件套）=====
@@ -554,5 +562,60 @@ class SysUserInfoView(APIView):
                 'status': '0',
             },
             'roles':['admin'] if user.is_staff else [],
-            'permissions':[],
+            # 2026-10-14 修：permissions 不能为空！
+            # 前端按钮全都挂着 v-hasPermi="['snack:product:edit']" 这类指令，
+            # 空数组 ⇒ 按钮被整个移除（操作列一片空白）。'*:*:*' 是若依给超级管理员的通配符。
+            'permissions':['*:*:*'] if user.is_staff else [],
         })
+
+
+# ===== 2026-10-13：AI 生成商品描述（第一个 LLM 业务接口）=====
+class AiDescriptionView(APIView):
+    '''
+    AI 生成商品描述：POST /snack/product/aiDescription
+        管理端商品表单点「AI 生成」→ 拿到文案填进描述框。
+        权限用 IsAdminUser：因为每次调用都消耗 token（花钱），不能开放给所有人。
+    '''
+    permission_classes = [IsAdminUser]
+
+    def post(self,request):
+        # ① 取前端传来的商品信息
+        name = (request.data.get('name') or '').strip()
+        if not name:
+            return Response({'code':400,'msg':'商品名不能为空'})
+        category = request.data.get('category') or '零食'
+        price = request.data.get('price') or ''
+
+        # ② 拼 prompt —— 这一步就是图里说的「数据注入」，
+        #    是 AI 应用的业务价值所在：把「你的数据」塞进「通用模型」的嘴里
+        prompt = (
+            f'你是一个零食电商的文案专家，请为下面这个商品写一段吸引人的描述：\n'
+            f'- 商品名称：{name}\n'
+            f'- 所属分类：{category}\n'
+            f'- 价格：{price} 元\n'
+            f'要求：1) 100 字以内；2) 突出口感或卖点；3) 不要堆砌感叹号；'
+            f'4) 只输出描述本身，不要任何前缀、解释或引号。'
+        )
+
+        # ③ 调大模型
+        try:
+            resp = requests.post(
+                'https://api.siliconflow.cn/v1/chat/completions',
+                headers = {'Authorization':f'Bearer {settings.SILICONFLOW_API_KEY}'},
+                json = {
+                    'model':'Qwen/Qwen2.5-7B-Instruct',
+                    'messages':[{'role':'user','content':prompt}],
+                    'max_tokens':300,                 # 限制输出长度 ⇒ 控成本，也防跑飞
+                    'temperature':0.8,              # 稍高 = 更有创意（0 会非常死板）
+                },
+                timeout = 30,            # 模型可能慢，必须设超时，否则请求会一直挂着
+            )
+            data = resp.json()
+
+        except Exception as e:
+            # ④ 外部服务失败 ≠ 我们的接口崩了，要给它包一层友好返回
+            return Response({'code':500,'msg':f'AI 调用失败：{e}'})
+
+        # ⑤ 按 OpenAI 规范取出文案
+        content = data['choices'][0]['message']['content'].strip()
+        return Response({'code':200,'msg':'操作成功','data':content})

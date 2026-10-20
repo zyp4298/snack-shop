@@ -84,6 +84,7 @@ urlpatterns = [
     # ===== 若依管理端模板兼容接口（2026-10-11 新增）=====
     path('system/dict/data/type/<str:dict_type>',views.SysDictDataView.as_view()),
     path('system/user/',views.SysUserInfoView.as_view()),
+    path('snack/product/aiDescription', views.AiDescriptionView.as_view()),
 
 ]
 
