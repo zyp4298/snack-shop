@@ -85,6 +85,7 @@ urlpatterns = [
     path('system/dict/data/type/<str:dict_type>',views.SysDictDataView.as_view()),
     path('system/user/',views.SysUserInfoView.as_view()),
     path('snack/product/aiDescription', views.AiDescriptionView.as_view()),
+    path('snack/product/aiSearch', views.AiSearchView.as_view()),
 
 ]
 

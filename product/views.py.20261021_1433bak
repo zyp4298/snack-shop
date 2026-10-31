@@ -1,0 +1,739 @@
+from pickle import FALSE
+from xmlrpc.client import Fault
+from rest_framework.decorators import action
+from django.shortcuts import render, HttpResponse
+from rest_framework import viewsets
+from rest_framework.permissions import IsAuthenticated
+from django.db.models import Count
+from scripts.regsetup import description
+
+from product.models import Category, Product, Banner, Cart, Order, Address, OrderProduct
+from product.serializers import (CategorySerializer, ProductSerializer, CartSerializer,
+                                 BannerSerializer, OrderSerializer, AddressSerializer, OrderProductSerializer)
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
+from rest_framework_simplejwt.tokens import RefreshToken
+from .pagination import CustomPagination
+from django.core.cache import cache # Django 内置缓存工具（背后就是 Redis）
+import time
+import uuid
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
+import requests
+from django.conf import settings
+import json
+from django.db.models import Q
+
+'''
+将DRF接入Django项目,总结起来就是以下几步:
+1. pip install djangorestframework  # 装包
+2. 在 settings.py 的 INSTALLED_APPS 里添加 'rest_framework'  # 注册
+3. 在 app 目录下新建 serializers.py,定义 Serializer 继承 serializers.ModelSerializer  # 翻译官
+4. 在 app 目录下新建 views_api.py,定义 ViewSet 继承 viewsets.ModelViewSet  # 视图集
+5. 在 urls.py 里用 DefaultRouter().register() 把 ViewSet 注册进去  # 路由
+'''
+
+
+# Serializer:对象 <-> JSON 翻译官
+# ViewSet:一个类打包 增/删/改/查 5 个接口
+# Router:URL 自动分发,一个 register 自动生成 5 个 URL
+
+# ModelViewSet 默认生成的 5 个接口:
+# GET    /api/xxx/         查所有
+# GET    /api/xxx/1/       查单个
+# POST   /api/xxx/         新增
+# PUT    /api/xxx/1/       修改
+# DELETE /api/xxx/1/       删除
+
+# Create your views here.
+
+class CategoryViewSet(viewsets.ModelViewSet):
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
+    '''给 CategoryViewSet 加分页 + 对齐 list'''
+    pagination_class = CustomPagination  # 列表自动变成 {code, rows, total}
+
+    def get_permissions(self):
+        # 读（列表/详情）→ 公开，小程序要浏览
+        if self.action in ('list','retrieve'):
+            return []
+        # 写（增/删/改）→ 只有管理员
+        return [IsAdminUser()]
+
+
+class ProductViewSet(viewsets.ModelViewSet):
+    queryset = Product.objects.all()
+    serializer_class = ProductSerializer
+    pagination_class = CustomPagination
+
+    def list(self, request, *args, **kwargs):
+        '''商品列表带缓存：先查 Redis → 没有就查 MySQL → 写回 Redis'''
+        # 2026-10-14 修：参数名必须是 pageNum（和 CustomPagination 里的 page_query_param 一致）
+        # 原来写 'page' 取不到值 → 永远返回 '1' → 所有页码共用同一个缓存 key → 翻页永远是第一页
+        page = request.query_params.get('pageNum','1')      # 当前第几页（第1页/第2页缓存分开）
+        page_size = request.query_params.get('pageSize', '10')
+        cache_key = f'product_list_{page}_{page_size}'  # 顺便把 pageSize 也纳入 key   # 便签名：product_list_1 / product_list_2
+        data = cache.get(cache_key)     # ① 先看便签板：有没有？
+        if data is not None:              # ② 有！直接返回（秒回 ⚡）
+            return Response(data)
+        response = super().list(request,*args,**kwargs) # ③ 没有 → 查 MySQL（几十毫秒）
+        cache.set(cache_key,response.data,300)  # ④ 写回便签板，300秒(5分钟)后自动过期
+        return response
+
+    def get_permissions(self):
+        if self.action in ('list','retrieve'):
+            return []
+        return [IsAdminUser()]
+
+
+class BannerViewSet(viewsets.ModelViewSet):
+    queryset = Banner.objects.all()
+    serializer_class = BannerSerializer
+
+    def get_permissions(self):
+        if self.action in ('list','retrieve'):
+            return []
+        return [IsAdminUser()]
+
+'''要看数据 → 用 Serializer      只是做动作 → 不用'''
+class CartViewSet(viewsets.ModelViewSet):
+    queryset = Cart.objects.all()  # 会返回所有的数据,张三也能看到别人
+    serializer_class = CartSerializer
+    '''permission_classes = [IsAuthenticated]   必须登录（有 token）才能访问，否则 401'''
+    permission_classes = [IsAuthenticated]  #必须登录才能访问
+    pagination_class = CustomPagination
+
+    '''get_queryset(self)   	重写数据来源方法，用 self.request.user 过滤'''
+
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return Cart.objects.all()
+        # 只返回当前用户(request.user)的购物车
+        return Cart.objects.filter(user=self.request.user)
+    @action(detail=False, methods=['get'])  # 如果设为 detail=True，URL 就会变成 /carts/1/selectMyCartList/
+    def selectMyCartList(self, request):
+        carts = Cart.objects.filter(user=request.user)
+        serializer = CartSerializer(carts, many=True)  # many=True,代表是一堆数据而不是一个,需要一一转化
+        return Response({'code': 200, 'data': serializer.data})
+    @action(detail=False,methods=['put'])       # 加购    前端调用 PUT /snack/cart/addProductToCart/101/   ← productId=101 加进购物车
+    def addProductToCart(self,request,product_id):      # product_id: URL 里的 <int:product_id> 自动传给方法
+        # 1. 找到商品
+        product = Product.objects.get(id=product_id)
+        # 2. 查购物车有没有这条（当前用户的 + 这个商品的）
+        cart_item = Cart.objects.filter(user=request.user,product=product).first()  # 查第一条（有返回对象，没有返回 None）
+        if cart_item:
+            # 3a. 有了 → 数量 +1
+            cart_item.quantity += 1
+            cart_item.save()
+        else:
+            # 3b. 没有 → 新建一条
+            Cart.objects.create(user=request.user,product=product,quantity=1)
+        return Response({'code': 200,'msg':'加入购物车成功'})
+    @action(detail=False,methods=['put'])
+    def increaseQuantity(self,request,cart_id):     # 购物车数量加一
+        # 只允许操作自己的购物车
+        cart_item = Cart.objects.filter(id=cart_id,user=request.user).first()
+        if not cart_item:
+            return Response({'code':200,'msg':'购物车记录不存在'})
+        cart_item.quantity += 1
+        cart_item.save()
+        return Response({'code':200,'msg':'数量+1'})
+    @action(detail=False,methods=['put'])
+    def reduceQuantity(self,request,cart_id):
+        cart_item = Cart.objects.filter(id=cart_id,user=request.user).first()
+        if not cart_item:
+            return Response({'code':200,'msg':'购物车记录不存在'})
+        cart_item.quantity -= 1
+        if cart_item.quantity <= 0:
+            cart_item.delete()
+        else:
+            cart_item.save()
+        return Response({'code':200,'msg':'数量-1'})
+
+    # 虎鲸 2026-09-03：批量删除购物车（兼容前端 delCart([5,7]) → /snack/cart/5,7）
+    # 原因：下单成功后，前端 confirm.vue 第 312 行 delCart(cartIds) 传数组 → URL = /snack/cart/5,7
+    #      DRF 默认 detail 路由会进 destroy，但 pk='5,7' 是字符串，无法 cart_item = Cart.objects.get(pk=pk) → 报错 500
+    #      解决方案：判断 pk 含逗号 → 拆成 ID 列表 → filter + delete
+    def destroy(self, request, *args, **kwargs):
+        pk = kwargs.get('pk', '')
+        if ',' in str(pk):
+            # 逗号分隔的多个 ID：批量删除
+            ids = [int(i) for i in str(pk).split(',') if i.isdigit()]
+            # 只删当前用户的（安全：防止删别人数据）
+            deleted_count, _ = Cart.objects.filter(id__in=ids, user=request.user).delete()
+            return Response({'code': 200, 'msg': f'已删除 {deleted_count} 条'})
+        # 单个 ID：走默认逻辑（ModelViewSet.destroy → get_object → perform_destroy）
+        return super().destroy(request, *args, **kwargs)
+
+
+class AddressViewSet(viewsets.ModelViewSet):
+    queryset = Address.objects.all()
+    serializer_class = AddressSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return Address.objects.all()
+        return Address.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)  # ← 新增：注入登录用户
+
+    @action(detail=False, methods=['get'])
+    def selectMyAddressList(self, request):
+        addresses = Address.objects.filter(user=request.user)
+        serializer = AddressSerializer(addresses, many=True)
+        return Response({'code': 200, 'data': serializer.data})
+
+
+class OrderViewSet(viewsets.ModelViewSet):
+    queryset = Order.objects.all()
+    serializer_class = OrderSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = CustomPagination
+    lookup_field = 'order_id'        # Order 主键是 order_id，不是默认的 id
+
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return Order.objects.all()
+        return Order.objects.filter(user=self.request.user)
+    @action(detail=False, methods=['get'])
+    def selectMyOrderList(self, request):
+        orders = Order.objects.filter(user=request.user)
+        serializer = OrderSerializer(orders, many=True)
+        return Response({'code': 200, 'data': serializer.data})
+
+    def perform_create(self, serializer):
+        # 生成订单号：OR + 时间戳（主键不能为空，后端生成）
+        order_id = 'OR' + time.strftime('%Y%m%d%H%M%S') + str(uuid.uuid4().int % 10000).zfill(4)
+        # 绑定当前登录用户 + 订单号
+        serializer.save(order_id=order_id, user=self.request.user)
+
+    # 虎鲸 2026-08-29：让 PUT 接受部分字段（前端只发改的 status）
+    def update(self, request, *args, **kwargs):
+        kwargs['partial'] = True
+        return super().update(request, *args, **kwargs)
+
+
+# class OrderProductViewSet(viewsets.ModelViewSet):
+#     queryset = OrderProduct.objects.all()
+#     serializer_class = OrderProductSerializer
+
+# 猜你喜欢（推荐商品）
+class RecommendationView(APIView):
+    def get(self,request):
+        # 简化版：随机返回 10 个商品
+        products = Product.objects.order_by('?')[:10]   # order_by('?') = 随机排序,[:10]是列表的 0到 10号元素
+        serializer = ProductSerializer(products,many=True)
+        return Response({
+            'code':200,
+            'msg':'查询成功',
+            'rows':serializer.data,     # ← 前端要 rows
+            'total':len(serializer.data)
+        })
+
+class ProductSearchView(APIView):
+
+    # 我知道这是APIView，属于手动views，因此没有自动设置方法，我便要手动添加get方法，那么数据便是来自数据库的Product的数据，查询条件是请求的数据。
+    # 翻译器就用productserializer翻译，翻译的数据就是刚才请求的数据，并且是多量数据。返回值，首先因为是自定义的，因此得手动返回需要的内容，code是
+    # 业务状态码，msg是提示信息，rows其实就是data？或者说data.list？这里不太理解，total就是返回多少条目，说实话我觉得可以去除掉，似乎没什么作用
+
+    def get(self,request):
+        keyword = request.query_params.get('keyword','')            #不理解的地方，我知道要请求的是搜索的数据，但为什么这么写？
+        products = Product.objects.filter(name__icontains=keyword)      #数据来源，但name__icontains是什么我忘了，这些__都是什么我都忘了，记得给我说说
+        serializer = ProductSerializer(products,many=True)
+        return Response({
+            'code':200,
+            'msg':'查询成功',
+            'rows':serializer.data,
+            'total':len(serializer.data),           #这行我认为没必要，毕竟翻译的数据长度还是那么长，因此返回的条目还是总共的
+        })
+
+
+# 注册接口
+class RegisterView(APIView):
+    def post(self, request):
+        username = request.data.get('username')
+        password = request.data.get('password')
+
+        # 校验：用户名不能为空
+        if not username or not password:
+            return Response({'error': '用户名和密码不能为空'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 校验：用户名不能重复
+        if User.objects.filter(username=username).exists():
+            return Response({'error': '用户名已存在'}, status=status.HTTP_400_BAD_REQUEST)
+
+        #创建用户
+        user = User.objects.create_user(username=username, password=password)
+
+        # 自动发 token（注册即登录）
+        refresh = RefreshToken.for_user(user)
+        return Response({
+            'code':200,
+            'msg': '注册成功',
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+        }, status=status.HTTP_200_OK)
+
+
+# 首页统计接口（合同清单 B 组）
+class HomePageView(APIView):
+    def get(self, request):
+        action = request.path.split('/')[-1]  # 取最后一段：selectDataInfo 等
+
+        if action == 'selectDataInfo':
+            # 统计三个总数
+            return Response({
+                'code': 200,
+                'data': {
+                    'productCount': Product.objects.count(),
+                    'orderCount': Order.objects.count(),
+                    'categoryCount': Category.objects.count(),
+                }
+            })
+        # 每个分类下有多少商品（饼图用）
+        if action == 'selectCategoryChart':
+            data = []
+            for c in Category.objects.annotate(num=Count('products')):
+                data.append({'name': c.name, 'value': c.num})
+            return Response({'code': 200, 'data': data})
+        # 订单状态统计（柱状图用）
+        if action == 'selectOrderStatusCount':
+            data = []
+            for s in Order.objects.values('status').annotate(num=Count('order_id')):
+                data.append({'name': s['status'], 'value': s['num']})
+            return Response({'code': 200, 'data': data})
+
+        return Response({'code': 500, 'msg': '未知操作'})
+
+
+# 分类下拉（前端 selectAllCategoryNameList 用）
+class CategoryNameListView(APIView):
+    def get(self, request):
+        data = [{'categoryId': c.id, 'categoryName': c.name} for c in Category.objects.all()]
+        return Response({'code': 200, 'data': data})
+
+
+# ============================================================
+# 以下为 2026-08-09 前端联调适配代码（已注释，暂停使用）
+# 以后要继续联调时，取消注释即可
+# ============================================================
+
+# ===== 验证码相关（2026-09-01 船长要求：不启用验证码，整段注释）=====
+# 验证码接口（返回 captchaEnabled=false 表示不需要验证码）
+# class CaptchaView(APIView):
+#     def get(self, request):
+#         return Response({
+#             'captchaEnabled': False,  # 前端看到 false → 不显示验证码
+#             'uuid': '',  # 留空
+#             'img': '',  # 留空
+#         })
+
+
+# 获取登录用户信息
+class UserInfoView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        return Response({
+            'code': 200,
+            'user': {
+                'userId': user.id,
+                'userName': user.username,
+                'nickName': user.username,
+                'avatar': '',
+            },
+            'roles': ['admin'] if user.is_staff else ['common'],
+            # 2026-10-14 修：permissions 不能为空！
+            # 前端按钮全都挂着 v-hasPermi="['snack:product:edit']" 这类指令，
+            # 空数组 ⇒ 按钮被整个移除（操作列一片空白）。'*:*:*' 是若依给超级管理员的通配符。
+            'permissions': ['*:*:*'] if user.is_staff else [],
+        })
+
+# ===== 虎鲸 2026-08-29：修改密码功能（Django 自带密码三件套）=====
+class UpdatePwdView(APIView):
+    permission_classes = [IsAuthenticated]
+    def put(self,request):
+        user = request.user
+        old_password = request.data.get('oldPassword')
+        new_password = request.data.get('newPassword')
+
+        # 1. 验证旧密码
+        if not user.check_password(old_password):
+            return Response({'msg':'旧密码不正确'},status=status.HTTP_400_BAD_REQUEST)
+
+        # 2. 设置新密码（自动加密存储）
+        user.set_password(new_password)
+        user.save()
+
+        return Response({'msg': '密码修改成功'})
+
+# 简单返回
+class LogoutView(APIView):
+    def post(self, request):
+        return Response({'code': 200, 'msg': '退出成功'})
+
+
+class RoutersView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not request.user.is_staff:
+            return Response({'code': 200, 'msg': '操作成功', 'data': []})
+        # 简单版：返回一个固定的菜单树（实际项目应该按角色动态返回）
+        return Response({
+            'code': 200,
+            'msg': '操作成功',
+            'data': [
+                {
+                    'name': 'Snack',
+                    'path': '/snack',
+                    'hidden': False,
+                    'redirect': 'noRedirect',
+                    'component': 'Layout',
+                    'meta': {'title': '零食商城', 'icon': 'shopping'},
+                    'children': [
+                        {'name': 'Category', 'path': 'category', 'component': 'snack/category/index',
+                         'meta': {'title': '零食分类', 'icon': 'list'}},
+                        {'name': 'Product', 'path': 'product', 'component': 'snack/product/index',
+                         'meta': {'title': '商品管理', 'icon': 'shopping-bag'}},
+                        {'name': 'Cart', 'path': 'cart', 'component': 'snack/cart/index',
+                         'meta': {'title': '购物车', 'icon': 'cart'}},
+                        {'name': 'Order', 'path': 'order', 'component': 'snack/order/index',
+                         'meta': {'title': '订单管理', 'icon': 'order'}},
+                        {'name': 'Address', 'path': 'address', 'component': 'snack/address/index',
+                         'meta': {'title': '收货地址', 'icon': 'address'}},
+                        {'name': 'Banner', 'path': 'banner', 'component': 'snack/banner/index',
+                         'meta': {'title': '轮播图', 'icon': 'image'}},
+                    ]
+                }
+            ]
+        })
+
+
+# 自定义登录（返回前端要的 token 字段）
+class LoginView(APIView):
+    def post(self, request):
+        username = request.data.get('username')
+        password = request.data.get('password')
+
+        user = authenticate(username=username, password=password)
+        if user is None:
+            return Response({'code': 500, 'msg': '用户名或密码错误'})
+
+        refresh = RefreshToken.for_user(user)
+        return Response({
+            'code': 200,
+            'msg': '登录成功',
+            'token': str(refresh.access_token),  # ← 前端要的 token！
+            'access': str(refresh.access_token),  # 兼容（以后可能用）
+            'refresh': str(refresh),
+        })
+
+# ============ 支付宝支付（沙箱）============
+from alipay import AliPay
+from django.conf import settings
+
+def get_alipay():
+    '''创建支付宝客户端（沙箱模式）'''
+    return AliPay(
+        appid=settings.ALIPAY_APPID,                    # 沙箱 APPID
+        app_notify_url=None,
+        app_private_key_string=settings.ALIPAY_APP_PRIVATE_KEY,  # 应用私钥（签名用）
+        alipay_public_key_string=settings.ALIPAY_PUBLIC_KEY,        # 支付宝公钥（验签用）
+        sign_type='RSA2',                                            # 签名算法
+        debug=True,                                                  # True=沙箱 False=正式
+    )
+
+class PayView(APIView):
+    '''① 生成支付链接：POST /snack/pay  body: {"order_id": "xxx"}'''
+    permission_classes = [IsAuthenticated]
+
+    def post(self,request):
+        # 1. 查订单（必须是自己的）
+        order_id = request.data.get('order_id')
+        order = Order.objects.filter(order_id=order_id,user=request.user).first()
+        if not order:
+            return Response({'code':500,'msg':'订单不存在'})
+
+        # 2. SDK 生成支付参数（相当于把订单信息"盖章"）
+        alipay = get_alipay()
+        order_string = alipay.api_alipay_trade_page_pay(
+            out_trade_no=order_id,                                      # 商户订单号（你的 order_id）
+            total_amount=str(order.total_amount),                        # 金额（字符串！）
+            subject='零食商城订单',                                        # 商品标题
+            return_url='http://116.62.205.54/pay/result',               # 付款后跳回页面（本地先用）
+            notify_url='http://116.62.205.54/snack/pay/callback',      # 异步回调（下面这个接口）
+        )
+        # 3. 拼完整链接：沙箱网关 + 参数（用 SDK 自带的网关，debug=True 自动选沙箱地址）
+        pay_url = alipay._gateway + '?' + order_string
+        return Response({'code':200,'pay_url':pay_url})
+
+class  PayCallbackView(APIView):
+    '''② 支付回调：POST /snack/pay/callback（支付宝自动来调）'''
+    def post(self,request):
+        alipay = get_alipay()
+        # 1. 支付宝发来的数据 + 签名
+        data = request.data.dict()
+        signature = data.pop('sign','')
+        # 2. 验证签名（防伪造：确认真是支付宝发的）
+        if alipay.verify(data,signature) and data.get('trade_status') == 'TRADE_SUCCESS':
+            # 3. 签名通过 + 支付成功 → 更新订单状态
+            order_id = data.get('out_trade_no')
+            Order.objects.filter(order_id=order_id).update(status='已支付')
+            return Response('success')      # ⚠️ 必须返回 success，否则支付宝反复重发
+        return Response('fail')
+
+from django.http import HttpResponse
+
+class PayResultView(APIView):
+    '''支付宝支付成功后跳回的页面（用户浏览器看到的"支付成功"页）'''
+    permission_classes = [] # 不需要登录（浏览器从支付宝跳转过来没 token）
+    authentication_classes = []  # 同上
+
+    def get(self, request):
+        # 简单 HTML页面，显示支付成功
+        #真实生产里通常跳到"我的订单"页，这里做个简单的提示页
+        return HttpResponse('''
+            <html>
+            <head><meta charset="utf-8"><title>支付成功</title></head>
+            <body style="text-align:center;padding-top:100px;font-family:sans-serif">
+                <h1 style="color:#52c41a">✅ 支付成功！</h1>
+                <p>订单支付已完成，可以关闭此页面了。</p>
+                <p style="color:#999;font-size:14px">真实订单状态已通过异步通知更新</p>
+            </body>
+            </html>
+        ''', content_type='text/html; charset=utf-8')
+
+# ===== 2026-10-11：适配若依管理端模板的"系统类"接口 =====
+# 背景：管理端前端是若依(Vue3)模板，它会调两个系统接口，而 Django 从来没有这两条路由 →
+#       一直 404 → 页面顶部弹"系统接口404异常"。
+# 下面两个类是它们的适配层：前端一行不改，只补后端。
+
+# 字典数据表：键 = 字典类型，值 = 若依格式的选项列表
+# ⚠️ 字段名是固定的（前端 utils/dict.js 里写死这么取）：
+#    dictLabel=显示文字 / dictValue=实际值 / listClass=标签颜色 / cssClass=自定义样式
+
+DICT_DATA = {
+    'order_status':[
+        {'dictLabel':'待收货','dictValue':'待收货','listClass':'primary','cssClass':''},
+        {'dictLabel':'已支付','dictValue':'已支付','listClass':'success','cssClass':''},
+        {'dictLabel':'已完成','dictValue':'已完成','listClass':'primary','cssClass':''},
+        {'dictLabel':'已取消','dictValue':'已取消','listClass':'info','cssClass':''},
+    ]
+}
+
+class SysDictDataView(APIView):
+    '''
+        若依模板的字典接口：GET /system/dict/data/type/<字典类型>
+        前端的 useDict('order_status') 会调它，把每项转成 {label, value} 给下拉框和表格标签用。
+        ⚠️ dictValue 必须和数据库里存的值一致 —— 本项目的 Order.status 存的是「中文」，
+           所以这里 value 也用中文；若改成数字码，表格里的订单状态列会显示不出来。
+    '''
+    permission_classes = [IsAuthenticated]
+
+    def get(self,request,dict_type:str):
+        return Response({
+            'code':200,
+            'msg':'操作成功',
+            'data':DICT_DATA.get(dict_type,[]),     # 没配的类型返回空列表（不是 404）  查不到 → 返回 []  → 接口正常返回空数据 ✅
+        })
+
+class SysUserInfoView(APIView):
+    '''若依模板的"当前用户信息"接口：GET /system/user/
+        管理端顶部导航栏（Navbar.vue）每次渲染都会调一次 —— 但它的返回值其实没被使用
+        （模板里遗留的调用），补上这个接口是为了消掉 404 红条。
+    '''
+    permission_classes = [IsAuthenticated]
+
+    def get(self,request):
+        user = request.user
+        return Response({
+            'code':200,
+            'msg':'操作成功',
+            'data':{
+                'userId':user.id,
+                'userName':user.username,
+                'nickName':user.username,
+                'email': user.email or '',
+                'phonenumber': '',
+                'sex': '0',
+                'avatar': '',
+                'status': '0',
+            },
+            'roles':['admin'] if user.is_staff else [],
+            # 2026-10-14 修：permissions 不能为空！
+            # 前端按钮全都挂着 v-hasPermi="['snack:product:edit']" 这类指令，
+            # 空数组 ⇒ 按钮被整个移除（操作列一片空白）。'*:*:*' 是若依给超级管理员的通配符。
+            'permissions':['*:*:*'] if user.is_staff else [],
+        })
+
+
+# ===== 2026-10-13：AI 生成商品描述（第一个 LLM 业务接口）=====
+class AiDescriptionView(APIView):
+    '''
+    AI 生成商品描述：POST /snack/product/aiDescription
+        管理端商品表单点「AI 生成」→ 拿到文案填进描述框。
+        权限用 IsAdminUser：因为每次调用都消耗 token（花钱），不能开放给所有人。
+    '''
+    permission_classes = [IsAdminUser]
+
+    def post(self,request):
+        # ① 取前端传来的商品信息
+        name = (request.data.get('name') or '').strip()
+        if not name:
+            return Response({'code':400,'msg':'商品名不能为空'})
+        category = request.data.get('category') or '零食'
+        price = request.data.get('price') or ''
+
+        # ② 拼 prompt —— 这一步就是图里说的「数据注入」，
+        #    是 AI 应用的业务价值所在：把「你的数据」塞进「通用模型」的嘴里
+        prompt = (
+            f'你是一个零食电商的文案专家，请为下面这个商品写一段吸引人的描述：\n'
+            f'- 商品名称：{name}\n'
+            f'- 所属分类：{category}\n'
+            f'- 价格：{price} 元\n'
+            f'要求：1) 100 字以内；2) 突出口感或卖点；3) 不要堆砌感叹号；'
+            f'4) 只输出描述本身，不要任何前缀、解释或引号。'
+        )
+
+        # ③ 调大模型
+        try:
+            resp = requests.post(
+                'https://api.siliconflow.cn/v1/chat/completions',
+                headers = {'Authorization':f'Bearer {settings.SILICONFLOW_API_KEY}'},
+                json = {
+                    'model':'Qwen/Qwen2.5-7B-Instruct',
+                    'messages':[{'role':'user','content':prompt}],
+                    'max_tokens':300,                 # 限制输出长度 ⇒ 控成本，也防跑飞
+                    'temperature':0.8,              # 稍高 = 更有创意（0 会非常死板）
+                },
+                timeout = 30,            # 模型可能慢，必须设超时，否则请求会一直挂着
+            )
+            data = resp.json()
+
+        except Exception as e:
+            # ④ 外部服务失败 ≠ 我们的接口崩了，要给它包一层友好返回
+            return Response({'code':500,'msg':f'AI 调用失败：{e}'})
+
+        # ⑤ 按 OpenAI 规范取出文案
+        content = data['choices'][0]['message']['content'].strip()
+        return Response({'code':200,'msg':'操作成功','data':content})
+
+# AI 智能导购接口
+class AiSearchView(APIView):
+    '''POST /snack/product/aiSearch  {"question": "有什么不辣的零食"}'''
+    permission_classes = [IsAuthenticated]      # 导购是给用户的，不是管理员
+
+    API = 'https://api.siliconflow.cn/v1/chat/completions'
+    MODEL = 'Qwen/Qwen2.5-7B-Instruct'
+
+    def post(self,request):
+        question = (request.data.get('question') or '').strip()
+        if not question:
+            return Response({'code':400,'msg':'问题不能为空'})
+
+        # ① 把"我库里有什么分类"告诉它 —— 不告诉，它就瞎猜
+        cats = list(Category.objects.values_list('name',flat=True))
+
+        system = (
+            '你是零食商城的导购助手。\n'
+            f'本店商品的分类只有这些：{cats}\n'
+            '【硬规则】只要用户提到口味、价格、品类、推荐、有没有某种商品，'
+            '你必须先调用工具 search_product(keyword, category, max_price, min_price) 查库。\n'
+            '你【不许】凭记忆或常识回答商品问题 —— 你不知道店里有什么。\n'
+            '调用方式：只输出一行 JSON：{"tool":"search_product","args":{...}}\n'
+            '只有在用户打招呼、或问题与商品完全无关时，才用中文直接回答。\n'
+            '输出 JSON 时不要任何解释、不要代码块。'
+        )
+
+        msgs =[{'role':'system','content':system},
+               {'role':'user','content':question}]
+
+        # ② 问 → 判 → 干 → 记 + 再问（就是 `run()` 那四个动词）
+        # 第一步,问,同时也是联网的
+        reply = self._ask(msgs)
+        plan = self._parse_tool_call(reply)
+        if plan is None:
+            return Response({'code': 200, 'msg': '操作成功',
+                             'data': {'reply': '这个问题我还没想清楚，能再说具体点吗？比如口味、价格范围。',
+                                      'products': []}})
+
+        # 第二步,判,解析它的决定
+        args = json.loads(reply).get('args',{})     # ★ 字符串 → 字典,模型没给 args 时,返回 {} → 不崩
+                                                    # plan['args'] ,KeyError → 500 崩掉
+        if not args:
+            return Response({'code': 400, 'msg': 'AI 没给出查询条件，请换个说法'})
+
+        for k, v in list(args.items()):
+            if isinstance(v, list):
+                args[k] = v[0] if v else None
+        args = {k: v for k, v in args.items() if v is not None}
+
+        # 第三步,干,
+        items = self._search(**args)
+
+        # brief 作用
+        # ① 能序列化	Product 对象不能直接变 JSON —— 必须转成 dict
+        # ② 喂模型要精简	只留 3 个字段。整个对象还带着 id / image / create_time → 白烧 token
+        # ③ 一份数据两用	它既是回喂给模型的内容，也是返回给前端的 products
+        brief = [{'name':p.name,'price':str(p.price),'desc':p.description} for p in items]
+
+        if not brief:  # 查不到 → 别让模型编
+            return Response({'code': 200, 'msg': '操作成功',
+                             'data': {'reply': f'没有找到符合条件的商品（条件：{args}），要不要换个口味试试？',
+                                      'products': []}})
+
+        # 第四步,记 + 再问（联网第 2 次）
+        msgs += [{'role':'assistant','content':reply,},
+                 {'role':'user','content':f'工具返回:{brief}。请据此推荐,50字以内'}]
+        final = self._ask(msgs)
+
+        # 万一它又输出 JSON —— 别把 JSON 露给用户
+        if final.startswith('{'):
+            final = '根据你的要求，这几款比较合适：' + '、'.join(p['name'] for p in brief)
+
+        return Response({'code':200,'msg':'操作成功',
+                             'data':{'reply':final,'products':brief}})
+
+    def _search(self,keyword=None,category=None,max_price=None,min_price=None):
+        '''工具本体：真的查数据库'''
+        qs = Product.objects.select_related('category')
+        if keyword:
+            qs = qs.filter(Q(name__icontains=keyword) | Q(description__icontains=keyword))
+        if category:
+            qs = qs.filter(category__name__icontains=category)
+        if max_price:
+            qs = qs.filter(price__lte=max_price)
+        if min_price:
+            qs = qs.filter(price__gte=min_price)
+        return qs[:5]
+
+    def _ask(self, messages):
+        '''电话线：和 AiDescriptionView 里那个一样'''
+        r = requests.post(
+            'https://api.siliconflow.cn/v1/chat/completions',
+            headers={'Authorization': f'Bearer {settings.SILICONFLOW_API_KEY}'},
+            json={'model': 'Qwen/Qwen2.5-7B-Instruct', 'messages': messages,
+                  'max_tokens': 400, 'temperature': 0.2},
+            timeout=30,
+        )
+        return r.json()['choices'][0]['message']['content'].strip()
+
+    def _parse_tool_call(self, reply: str):
+        '''从句子的自由文本里抠出 JSON；抠不出来就返回 None'''
+        s = reply.strip()
+        if s.startswith('```'):  # 去掉 ```json 包裹
+            s = s.strip('`').replace('json', '', 1).strip()
+        a, b = s.find('{'), s.rfind('}')  # 只取第一个 { 到最后一个 }
+        if a == -1 or b <= a:
+            return None
+        try:
+            return json.loads(s[a:b + 1])
+        except json.JSONDecodeError:
+            print('❌ 解析失败，模型原文：', repr(s[a:b + 1]))  # 留证据，别静默吞掉
+            return None
