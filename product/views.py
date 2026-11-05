@@ -643,19 +643,36 @@ class AiSearchView(APIView):
         'type': 'function',
         'function': {
             'name': 'search_product',
-            'description': '按关键词/分类/价格范围查询零食商品',
+            'description': '按关键词/分类/价格查询【具体商品】，返回商品列表。'
+                           '用户想看到买什么的时候用它，不要用 list_categories 代替',
             'parameters': {
                 'type': 'object',
                 'properties': {
                     'keyword':   {'type': 'string', 'description': '商品名或口味词，不确定就别传'},
                     'category':  {'type': 'string', 'description': '分类名，只能填一个'},
-                    'max_price': {'type': 'number', 'description': '最高价'},
-                    'min_price': {'type': 'number', 'description': '最低价'},
+                    'max_price': {'type': 'number',
+                                  'description': '价格上限。用户说"X元以内/不超过X/便宜点"时填'},
+                    'min_price': {'type': 'number',
+                                  'description': '价格下限。用户说"X元以上/至少X/超过X"时填'},
+                    'order_by':  {'type': 'string',
+                                  'enum': ['price_asc', 'price_desc'],
+                                  'description': '排序方式。用户问"最便宜/最低价/哪个便宜"填 price_asc；'
+                                                 '问"最贵/最高价"填 price_desc。'
+                                                 '不要自己比较价格，传这个参数让我来排'},
                 },
                 'required': [],
             },
         },
-    }]
+    }, {                                    # ← 新增这道
+            'type': 'function',
+            'function': {
+                'name': 'list_categories',
+                'description': '列出店里所有商品分类及每类数量。用户问"有哪些分类/卖什么种类"时用'
+                               '仅在用户明确问分类时用',
+                'parameters': {'type': 'object', 'properties': {}, 'required': []},
+            },
+        },
+    ]
 
     def post(self,request):
         question = (request.data.get('question') or '').strip()
@@ -668,54 +685,120 @@ class AiSearchView(APIView):
         system = (
             '你是零食商城的导购助手。\n'
             f'本店商品的分类只有这些：{cats}\n'
+            '你有两个工具：search_product（按关键词/分类/价格查商品）、'
+            'list_categories（查有哪些分类、各多少个）。\n'
+            '【选工具的判断】\n'
+            '- 用户问"有哪些分类/卖什么种类/都有什么类别" → 用 list_categories\n'
+            '- 用户问"有什么零食/推荐点吃的/有没有XX/多少钱" → 用 search_product\n'
+            '- 用户问得笼统、没给关键词时，search_product 一个参数都不传，直接把商品列表拿出来\n'
             '【硬规则】只要用户提到口味、价格、品类、推荐、有没有某种商品，'
-            '你必须先调用工具 search_product(keyword, category, max_price, min_price) 查库。\n'
+            '你必须先调用工具查库。\n'
             '你【不许】凭记忆或常识回答商品问题 —— 你不知道店里有什么。\n'
             '只有在用户打招呼、或问题与商品完全无关时，才用中文直接回答。\n'
+            '【重要】search_product 返回的 total 是"符合条件的总数"，'
+            'shown 是"这次给你看的条数"。\n'
+            '如果 total 大于 shown，说明你只看到了一部分（最多 5 条）。\n'
+            '回答时必须说"我们有不少，先给你看这几款"，不能说成"就这些"。\n'
         )
 
-        msgs =[{'role':'system','content':system},
-               {'role':'user','content':question}]
+        # ①.5 取这个用户的历史（存在 Redis 里，key 带 user.id ⇒ 天然隔离）
+        cache_key = f'ai_history:{request.user.id}'
+        history = cache.get(cache_key) or []
 
-        # ---------- ② 问（联网第 1 次）----------
-        # msg 是 dict，里面可能有 tool_calls
-        msg = self._ask(msgs)
-        calls = msg.get('tool_calls')
-        if not calls:           # 模型没"点单" → 它直接回答了
-            return Response({'code': 200, 'msg': '操作成功',
-                             'data': {'reply': msg.get('content') or '',
-                                      'products': []}})
+        msgs = ([{'role': 'system', 'content': system}]
+                + history
+                + [{'role': 'user', 'content': question}])
+        '''
+        完全等价于这种更好懂的写法：
+        msgs = []
+        msgs.append({'role': 'system', 'content': system})
+        msgs.extend(history)                                   # ← 注意是 extend,里面的元素一个个倒进来（摊平）
+        msgs.append({'role': 'user', 'content': question})
+        '''
 
-        # ---------- ③ 判：把它的"订单"拆开 ----------
-        call = calls[0]
-        args = json.loads(call['function']['arguments'])        # ← 还是 json.loads
+        # ② 分发表：工具名 → 方法（self. 已经绑定好了，可以直接调）
+        handlers = {
+            'search_product':self._search,
+            'list_categories':self._list_categories,
+        }
 
-        # ---------- ④ 干：真的查数据库 ----------
-        items = self._search(**args)
-        brief = [{'name': p.name, 'price': str(p.price), 'desc': p.description}
-                 for p in items]
+        products = []       # 最后要交给前端的那份
+        reply = ''
 
-        if not brief:           # 查不到 → 别让模型编
-            return Response({'code': 200, 'msg': '操作成功',
-                             'data': {'reply': f'没找到符合「{question}」的商品，换个说法试试？',
-                                      'products': []}})
+        # ③ 主循环：问 → 判 → 干 → 记
+        for i in range(1,6):            # 最多 5 轮，保险丝
+            msg = self._ask(msgs)
+            calls = msg.get('tool_calls')
 
-        # ---------- ⑤ 记 + 再问（联网第 2 次）----------
-        msgs.append(msg)            # 原样放回（里面带 tool_calls）
-        msgs.append({
-            'role': 'tool',
-            'tool_call_id': call['id'],            # 配对号
-            'content': json.dumps(brief, ensure_ascii=False),
-        })
-        final = self._ask(msgs)
+            if not calls:               # 它答完了
+                reply = msg.get('content') or ''
+                break
 
-        # 万一它又调工具（没给自然语言），就用兜底文案
-        reply = final.get('content') or ('推荐：' + '、'.join(p['name'] for p in brief))
+            msgs.append(msg)            # 记：它这张单子
+
+            for call in calls:          # 一轮可能点好几道菜
+                name = call['function']['name']
+                args = json.loads(call['function']['arguments'])
+                '''
+                json.loads() — 字符串 → Python 对象
+                json.load() — 文件对象 → Python 对象
+                json.dumps() — Python 对象 → 字符串
+                json.dump() — Python 对象 → 写入文件
+                '''
+
+                if name not in handlers:  # 模型点了个菜单上没有的
+                    result = {'error': f'没有这个工具：{name}'}
+                else:
+                    result = handlers[name](**args)
+
+                if isinstance(result, dict) and 'products' in result:
+                    products = result['products']
+                    print(f'[ai] {name}({args}) → 总共 {result["total"]} 条，显示 {result["shown"]} 条')
+                else:
+                    print(f'[ai] {name}({args}) → {len(result)} 项')
+
+                msgs.append({
+                    'role': 'tool',
+                    'tool_call_id': call['id'],
+                    'content': json.dumps(result, ensure_ascii=False),
+                })
+        # ④.5 存回去：去掉 system，只留最近 6 轮，30 分钟过期
+        turns = msgs[1:]
+        user_idx = [i for i,m in enumerate(turns) if m['role'] == 'user']
+        if len(user_idx) > 6:
+            turns = turns[user_idx[-6]:]
+        cache.set(cache_key,turns,1800)
+        '''
+        enumerate(turns)
+        # → (0, turns[0]), (1, turns[1]), (2, turns[2]) ...   给每个元素配上序号
+        
+        for i, m in enumerate(turns)
+        # → i 拿序号，m 拿元素
+        
+        if m['role'] == 'user'
+        # → 只要 role 是 user 的
+        
+        [i for ...]
+        # → 把 i 收集成列表
+        -------------------------------------
+        更笨、但最不容易看错的写法：
+        user_idx = []
+        for i in range(len(turns)):
+            if turns[i]['role'] == 'user':
+                user_idx.append(i)
+        '''
+
+        # ④ 收尾：模型没给话，自己拼一句
+        if not reply:
+            if products:
+                reply = '推荐：' + '、'.join(p['name'] for p in products)
+            else:
+                reply = f'没找到符合「{question}」的商品，换个说法试试？'
 
         return Response({'code': 200, 'msg': '操作成功',
-                         'data': {'reply': reply, 'products': brief}})
+                                     'data': {'reply': reply, 'products': products}})
 
-    def _search(self,keyword=None,category=None,max_price=None,min_price=None):
+    def _search(self,keyword=None,category=None,max_price=None,min_price=None,order_by=None):
         '''工具本体：真的查数据库'''
         qs = Product.objects.select_related('category')
 
@@ -749,12 +832,25 @@ class AiSearchView(APIView):
             ④ if c.strip()           → 过滤掉空字符串
             最终：names = ["甜食", "饼干", "薯片"]
             '''
-
         if max_price:       # 价格过滤
             qs = qs.filter(price__lte=max_price)
         if min_price:
             qs = qs.filter(price__gte=min_price)
-        return qs[:5]       # 只返回前 5 条结果。为什么？防止模型一次拿到几百条商品，token 爆炸。
+
+        # 排序：只认白名单
+        ORDER = {'price_asc':'price','price_desc':'-price'}
+        if order_by in ORDER:       # ← 不在白名单，就当成没传，悄悄忽略
+            qs = qs.order_by(ORDER[order_by])
+
+        # 原来是 return qs[:5]
+        #  返回"小票"而不是 QuerySet
+        # 理由：工具结果要 json.dumps 回喂给模型，QuerySet 序列化不了
+        # 返回"小票"+ 总量，而不是 QuerySet
+        # 理由① QuerySet 没法 json.dumps
+        # 理由② 必须告诉模型"总共多少 / 我只给你看了几条"，否则它以为这些就是全部
+        items = [{'name': p.name, 'price': str(p.price), 'desc': p.description}
+                     for p in qs[:5]]
+        return {'total': qs.count(), 'shown': len(items), 'products': items}       # 只返回前 5 条结果。为什么？防止模型一次拿到几百条商品，token 爆炸。
     '''
     完整 SQL 长什么样,假设模型填了 {"keyword":"薯片","max_price":15,"category":"膨化"}：
     
@@ -768,128 +864,139 @@ class AiSearchView(APIView):
     LIMIT 5;
     '''
 
+    def _list_categories(self):
+        '''工具本体②：统计每个分类有多少商品'''
+        stat = {}
+        for name in Product.objects.values_list('category__name',flat=True):
+            if name:             # 没分类的商品跳过
+                stat[name] = stat.get(name, 0) + 1
+        return stat
+
     # ========== 电话线：注意返回的是整个 message ==========
     def _ask(self, messages):
-        r = requests.post(
-            self.API,
-            headers={'Authorization': f'Bearer {settings.SILICONFLOW_API_KEY}'},
-            json={'model': self.MODEL,
-                  'messages': messages,
-                  'max_tokens': 400,
-                  'temperature': 0.2,
-                  'tools': self.TOOLS},
-            timeout=30,
-        )
-        return r.json()['choices'][0]['message']
-    '''
-    整个方法的工作过程:
-    
-    假设前端发来：
-    POST /snack/product/aiSearch
-    {"question": "有什么不辣的零食推荐"}
-    
-    第一次请求:
-    msg = self._ask(msgs)    # ← 第一次联网
-    
-    此时发给模型的 msgs：
-        [{'role': 'system', 'content': '你是零食商城的导购助手。\n本店商品的分类只有这些：[\'膨化食品\', \'糖果\', \'饮料\', \'辣味零食\']\n
-        【硬规则】只要用户提到口味、价格、品类、推荐……你必须先调用工具 search_product……'},
-        {'role': 'user', 'content': '有什么不辣的零食推荐'}]
-    还附带了 tools=self.TOOLS（工具菜单）。
-    
-    🧠 模型的"内心独白"（第一次请求）
-    收到任务了。让我看看……
-    system 说：我是导购，店里分类有膨化食品、糖果、饮料、辣味零食。硬规则是——只要用户提到口味、推荐，我必须先调 search_product 查库，不许凭记忆回答。
-    用户问："有什么不辣的零食推荐"
-    分析：
-    "不辣" → 这是口味词 ✅
-    "零食推荐" → 这是推荐请求 ✅
-    触发硬规则 → 我必须调工具
-    我能直接回答吗？不能。我不知道店里具体有哪些不辣的商品。system 明确说了"不许凭记忆回答商品问题"。
-    那调什么工具？search_product。
-    传什么参数？
-    keyword：用户说"不辣"，传 "不辣" ← 模型不知道函数里怎么筛，但它知道 keyword 是"商品名或口味词"
-    category：不确定，不传
-    max_price / min_price：没提价格，不传
-    好，填单。
-    
-    输出的msg:
-        {
-            'role': 'assistant',
-            'content': None,          # ← 没有自然语言内容
-            'tool_calls': [{
-                'id': 'call_abc123',
-                'type': 'function',
-                'function': {
-                    'name': 'search_product',
-                    'arguments': '{"keyword":"不辣"}'    # ← 模型填的单
-                }
-            }]
-        }
-    注意：content 是 None。模型这次没说一句话，只填了工单。
-    
-    代码做了什么（两次请求之间）:
-        call = calls[0]
-        args = json.loads(call['function']['arguments'])
-        # args = {'keyword': '不辣'}
+        try:
+            r = requests.post(
+                self.API,
+                headers={'Authorization': f'Bearer {settings.SILICONFLOW_API_KEY}'},
+                json={'model': self.MODEL,
+                      'messages': messages,
+                      'max_tokens': 400,
+                      'temperature': 0.2,
+                      'tools': self.TOOLS},
+                timeout=30,
+            )
+            return r.json()['choices'][0]['message']
+        except Exception as e:
+            raise RuntimeError(f'AI 调用失败：{e}')
+        '''
+        整个方法的工作过程:
         
-        items = self._search(**args)
-        # → Django ORM 查数据库
-        # → SELECT * FROM product WHERE name LIKE '%不辣%' OR description LIKE '%不辣%' LIMIT 5
-        # → 假设返回：[原味薯片(¥5), 草莓软糖(¥8)]
+        假设前端发来：
+        POST /snack/product/aiSearch
+        {"question": "有什么不辣的零食推荐"}
         
-        brief = [{'name': '原味薯片', 'price': '5', 'desc': '...'},
-                 {'name': '草莓软糖', 'price': '8', 'desc': '...'}]
-    
-    然后：
-        msgs.append(msg)     # 把模型第一次的回复（含 tool_calls）原样放回
-        msgs.append({
-            'role': 'tool',
-            'tool_call_id': 'call_abc123',
-            'content': '[{"name":"原味薯片","price":"5",...},{"name":"草莓软糖","price":"8",...}]'
-        })
+        第一次请求:
+        msg = self._ask(msgs)    # ← 第一次联网
+        
+        此时发给模型的 msgs：
+            [{'role': 'system', 'content': '你是零食商城的导购助手。\n本店商品的分类只有这些：[\'膨化食品\', \'糖果\', \'饮料\', \'辣味零食\']\n
+            【硬规则】只要用户提到口味、价格、品类、推荐……你必须先调用工具 search_product……'},
+            {'role': 'user', 'content': '有什么不辣的零食推荐'}]
+        还附带了 tools=self.TOOLS（工具菜单）。
+        
+        🧠 模型的"内心独白"（第一次请求）
+        收到任务了。让我看看……
+        system 说：我是导购，店里分类有膨化食品、糖果、饮料、辣味零食。硬规则是——只要用户提到口味、推荐，我必须先调 search_product 查库，不许凭记忆回答。
+        用户问："有什么不辣的零食推荐"
+        分析：
+        "不辣" → 这是口味词 ✅
+        "零食推荐" → 这是推荐请求 ✅
+        触发硬规则 → 我必须调工具
+        我能直接回答吗？不能。我不知道店里具体有哪些不辣的商品。system 明确说了"不许凭记忆回答商品问题"。
+        那调什么工具？search_product。
+        传什么参数？
+        keyword：用户说"不辣"，传 "不辣" ← 模型不知道函数里怎么筛，但它知道 keyword 是"商品名或口味词"
+        category：不确定，不传
+        max_price / min_price：没提价格，不传
+        好，填单。
+        
+        输出的msg:
+            {
+                'role': 'assistant',
+                'content': None,          # ← 没有自然语言内容
+                'tool_calls': [{
+                    'id': 'call_abc123',
+                    'type': 'function',
+                    'function': {
+                        'name': 'search_product',
+                        'arguments': '{"keyword":"不辣"}'    # ← 模型填的单
+                    }
+                }]
+            }
+        注意：content 是 None。模型这次没说一句话，只填了工单。
+        
+        代码做了什么（两次请求之间）:
+            call = calls[0]
+            args = json.loads(call['function']['arguments'])
+            # args = {'keyword': '不辣'}
             
-    第二次请求
-    此时 msgs 的完整内容
-    [
-        # ① system
-        {'role': 'system', 'content': '你是零食商城的导购助手。\n本店商品的分类只有这些：[\'膨化食品\', \'糖果\', \'饮料\', \'辣味零食\']\n...'},
-    
-        # ② user
-        {'role': 'user', 'content': '有什么不辣的零食推荐'},
-    
-        # ③ assistant（第一次回复，含 tool_calls）
-        {'role': 'assistant', 'content': None, 'tool_calls': [{
-            'id': 'call_abc123',
-            'function': {'name': 'search_product', 'arguments': '{"keyword":"不辣"}'}
-        }]},
-    
-        # ④ tool（代码执行结果）
-        {'role': 'tool', 'tool_call_id': 'call_abc123', 'content': '[{"name":"原味薯片","price":"5","desc":"..."},
-            {"name":"草莓软糖","price":"8","desc":"..."}]'}
-    ]
-    
-    🧠 模型的"内心独白"（第二次请求）
-        又收到请求了。让我看看完整上下文……
-        system：我是导购，硬规则是必须先查库。
-        user：有什么不辣的零食推荐
-        我之前：调了 search_product，keyword="不辣"
-        tool 返回：查到了 2 个商品——原味薯片（5元）、草莓软糖（8元）
-        好，现在我有了真实数据。system 说不许凭记忆回答，现在我有库里的真实结果了，可以组织回答了。
-        怎么组织？
-        语气：导购应该热情、友好
-        内容：推荐这两个商品，说明它们不辣，提一下价格
-        格式：自然语言，不用 JSON
-        写回答。
-    
-    📤 模型第二次请求的实际输出（final）
-        {
-            'role': 'assistant',
-            'content': '为您推荐以下不辣的零食：\n1. 原味薯片（¥5）—— 经典原味，酥脆不辣\n2. 草莓软糖（¥8）—— 香甜草莓味，
-                不含辣味\n都是店里销量不错的不辣选择哦！',
-            'tool_calls': None       # ← 这次没有 tool_calls，直接给答案
-        }
-    注意：这次 tool_calls 没了，content 有内容。模型"交卷"了。
-    
-    
-    '''
+            items = self._search(**args)
+            # → Django ORM 查数据库
+            # → SELECT * FROM product WHERE name LIKE '%不辣%' OR description LIKE '%不辣%' LIMIT 5
+            # → 假设返回：[原味薯片(¥5), 草莓软糖(¥8)]
+            
+            brief = [{'name': '原味薯片', 'price': '5', 'desc': '...'},
+                     {'name': '草莓软糖', 'price': '8', 'desc': '...'}]
+        
+        然后：
+            msgs.append(msg)     # 把模型第一次的回复（含 tool_calls）原样放回
+            msgs.append({
+                'role': 'tool',
+                'tool_call_id': 'call_abc123',
+                'content': '[{"name":"原味薯片","price":"5",...},{"name":"草莓软糖","price":"8",...}]'
+            })
+                
+        第二次请求
+        此时 msgs 的完整内容
+        [
+            # ① system
+            {'role': 'system', 'content': '你是零食商城的导购助手。\n本店商品的分类只有这些：[\'膨化食品\', \'糖果\', \'饮料\', \'辣味零食\']\n...'},
+        
+            # ② user
+            {'role': 'user', 'content': '有什么不辣的零食推荐'},
+        
+            # ③ assistant（第一次回复，含 tool_calls）
+            {'role': 'assistant', 'content': None, 'tool_calls': [{
+                'id': 'call_abc123',
+                'function': {'name': 'search_product', 'arguments': '{"keyword":"不辣"}'}
+            }]},
+        
+            # ④ tool（代码执行结果）
+            {'role': 'tool', 'tool_call_id': 'call_abc123', 'content': '[{"name":"原味薯片","price":"5","desc":"..."},
+                {"name":"草莓软糖","price":"8","desc":"..."}]'}
+        ]
+        
+        🧠 模型的"内心独白"（第二次请求）
+            又收到请求了。让我看看完整上下文……
+            system：我是导购，硬规则是必须先查库。
+            user：有什么不辣的零食推荐
+            我之前：调了 search_product，keyword="不辣"
+            tool 返回：查到了 2 个商品——原味薯片（5元）、草莓软糖（8元）
+            好，现在我有了真实数据。system 说不许凭记忆回答，现在我有库里的真实结果了，可以组织回答了。
+            怎么组织？
+            语气：导购应该热情、友好
+            内容：推荐这两个商品，说明它们不辣，提一下价格
+            格式：自然语言，不用 JSON
+            写回答。
+        
+        📤 模型第二次请求的实际输出（final）
+            {
+                'role': 'assistant',
+                'content': '为您推荐以下不辣的零食：\n1. 原味薯片（¥5）—— 经典原味，酥脆不辣\n2. 草莓软糖（¥8）—— 香甜草莓味，
+                    不含辣味\n都是店里销量不错的不辣选择哦！',
+                'tool_calls': None       # ← 这次没有 tool_calls，直接给答案
+            }
+        注意：这次 tool_calls 没了，content 有内容。模型"交卷"了。
+        
+        
+        '''

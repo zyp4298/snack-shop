@@ -16,3 +16,4 @@ db.sqlite3
 零食商城/settings_local.py
 /ai agent 练习
 test.py
+check_ai.py
