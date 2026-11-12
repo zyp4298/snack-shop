@@ -624,6 +624,7 @@ class AiDescriptionView(APIView):
         content = data['choices'][0]['message']['content'].strip()
         return Response({'code':200,'msg':'操作成功','data':content})
 
+# ===========================================================================
 # AI 智能导购接口
 class AiSearchView(APIView):
     '''POST /snack/product/aiSearch  {"question": "有什么不辣的零食"}
@@ -695,14 +696,18 @@ class AiSearchView(APIView):
             '你必须先调用工具查库。\n'
             '你【不许】凭记忆或常识回答商品问题 —— 你不知道店里有什么。\n'
             '只有在用户打招呼、或问题与商品完全无关时，才用中文直接回答。\n'
-            '【重要】search_product 返回的 total 是"符合条件的总数"，'
-            'shown 是"这次给你看的条数"。\n'
-            '如果 total 大于 shown，说明你只看到了一部分（最多 5 条）。\n'
-            '回答时必须说"我们有不少，先给你看这几款"，不能说成"就这些"。\n'
+            '【回答长度】\n'
+            '前端会把商品渲染成卡片，所以你【不要】逐条复述商品名和价格。\n'
+            '回答只要一句话给结论：最便宜或最推荐的是哪个、多少钱。\n'
+            '有商品时不超过 40 字；没有商品时（比如问分类）不超过 60 字。\n'
+            '不要说"共几款"这类数字，前端卡片会显示总数。\n'
+            '只有用户直接问"一共有多少/总共几款"时，才用 total 那个数回答。\n'
         )
 
         # ①.5 取这个用户的历史（存在 Redis 里，key 带 user.id ⇒ 天然隔离）
-        cache_key = f'ai_history:{request.user.id}'
+        # 会话号：前端传就按传的，没传就落到 default（旧调用不会坏）
+        sid = str(request.data.get('session_id') or 'default').strip()[:32] or 'default'
+        cache_key = f'ai_history:{request.user.id}:{sid}'
         history = cache.get(cache_key) or []
 
         msgs = ([{'role': 'system', 'content': system}]
@@ -723,11 +728,18 @@ class AiSearchView(APIView):
         }
 
         products = []       # 最后要交给前端的那份
+        total_count = 0      # ← 新增：符合条件的总数，前端显示"共 N 款"
         reply = ''
 
         # ③ 主循环：问 → 判 → 干 → 记
         for i in range(1,6):            # 最多 5 轮，保险丝
-            msg = self._ask(msgs)
+            try:
+                msg = self._ask(msgs)
+            except RuntimeError as e:
+                print(f'[ai] 调用失败：{e}')  # 日志留痕，方便排查
+                return Response({'code': 500, 'msg': 'AI 现在有点忙，稍后再试','total': total_count,
+                                 'data': {'reply': '我这边暂时连不上，稍等一下再问我一次？',
+                                          'products': products}})
             calls = msg.get('tool_calls')
 
             if not calls:               # 它答完了
@@ -753,6 +765,7 @@ class AiSearchView(APIView):
 
                 if isinstance(result, dict) and 'products' in result:
                     products = result['products']
+                    total_count = result['total']
                     print(f'[ai] {name}({args}) → 总共 {result["total"]} 条，显示 {result["shown"]} 条')
                 else:
                     print(f'[ai] {name}({args}) → {len(result)} 项')
@@ -796,7 +809,9 @@ class AiSearchView(APIView):
                 reply = f'没找到符合「{question}」的商品，换个说法试试？'
 
         return Response({'code': 200, 'msg': '操作成功',
-                                     'data': {'reply': reply, 'products': products}})
+                         'data': {'reply': reply,
+                                  'products': products,
+                                  'total': total_count}})
 
     def _search(self,keyword=None,category=None,max_price=None,min_price=None,order_by=None):
         '''工具本体：真的查数据库'''
