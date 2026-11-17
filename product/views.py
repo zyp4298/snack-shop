@@ -6,6 +6,7 @@ from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Count
 from scripts.regsetup import description
+from sympy.abc import delta
 
 from product.models import Category, Product, Banner, Cart, Order, Address, OrderProduct
 from product.serializers import (CategorySerializer, ProductSerializer, CartSerializer,
@@ -25,6 +26,8 @@ import requests
 from django.conf import settings
 import json
 from django.db.models import Q
+from django.http import StreamingHttpResponse
+from rest_framework.permissions import AllowAny
 
 '''
 将DRF接入Django项目,总结起来就是以下几步:
@@ -488,7 +491,8 @@ class  PayCallbackView(APIView):
             return Response('success')      # ⚠️ 必须返回 success，否则支付宝反复重发
         return Response('fail')
 
-from django.http import HttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
+
 
 class PayResultView(APIView):
     '''支付宝支付成功后跳回的页面（用户浏览器看到的"支付成功"页）'''
@@ -649,8 +653,12 @@ class AiSearchView(APIView):
             'parameters': {
                 'type': 'object',
                 'properties': {
-                    'keyword':   {'type': 'string', 'description': '商品名或口味词，不确定就别传'},
-                    'category':  {'type': 'string', 'description': '分类名，只能填一个'},
+                    'keyword':   {'type': 'string', 'description': '商品名或具体品类词，如"巧克力""薯片""饼干"。'
+                                                                    '用户说一个具体东西时用它。'
+                                                                    '注意：它和 category 是"同时满足"的关系，'
+                                                                    '除非用户明确说"XX分类里的YY"，否则只填这一个'},
+                    'category':  {'type': 'string', 'description': '店里的粗分类，只能是上面那10个之一。'
+                                                                    '用户说的词不是分类名时，不要填它'},
                     'max_price': {'type': 'number',
                                   'description': '价格上限。用户说"X元以内/不超过X/便宜点"时填'},
                     'min_price': {'type': 'number',
@@ -684,24 +692,32 @@ class AiSearchView(APIView):
         cats = list(Category.objects.values_list('name',flat=True))
 
         system = (
-            '你是零食商城的导购助手。\n'
-            f'本店商品的分类只有这些：{cats}\n'
+            f'你是零食商城的导购助手。本店商品分类只有这些：{cats}\n'
             '你有两个工具：search_product（按关键词/分类/价格查商品）、'
             'list_categories（查有哪些分类、各多少个）。\n'
-            '【选工具的判断】\n'
-            '- 用户问"有哪些分类/卖什么种类/都有什么类别" → 用 list_categories\n'
-            '- 用户问"有什么零食/推荐点吃的/有没有XX/多少钱" → 用 search_product\n'
-            '- 用户问得笼统、没给关键词时，search_product 一个参数都不传，直接把商品列表拿出来\n'
-            '【硬规则】只要用户提到口味、价格、品类、推荐、有没有某种商品，'
-            '你必须先调用工具查库。\n'
-            '你【不许】凭记忆或常识回答商品问题 —— 你不知道店里有什么。\n'
-            '只有在用户打招呼、或问题与商品完全无关时，才用中文直接回答。\n'
-            '【回答长度】\n'
-            '前端会把商品渲染成卡片，所以你【不要】逐条复述商品名和价格。\n'
-            '回答只要一句话给结论：最便宜或最推荐的是哪个、多少钱。\n'
-            '有商品时不超过 40 字；没有商品时（比如问分类）不超过 60 字。\n'
-            '不要说"共几款"这类数字，前端卡片会显示总数。\n'
-            '只有用户直接问"一共有多少/总共几款"时，才用 total 那个数回答。\n'
+            '\n'
+            '【怎么回答问题】\n'
+            '前端会把商品渲染成卡片，名字和价格都在卡片上。\n'
+            '你只回一句话，不要逐条复述商品名和价格。\n'
+            '- 问"有什么/有哪些" → 一句话说这类东西，比如口味特点或价位\n'
+            '- 问"最便宜/最贵" → 直接说那一款叫什么、多少钱\n'
+            '- 问"多少钱" → 直接说价格\n'
+            '\n'
+            '【调哪个工具】\n'
+            '- 问"有哪些分类/卖什么种类/都有什么类别" → list_categories\n'
+            '- 问"XX分类里有哪些 / XX类有什么" → search_product，category 填那个分类名\n'
+            '- 其余商品问题（有什么零食、多少钱、推荐） → search_product\n'
+            '\n'
+            '【search_product 填什么参数】\n'
+            '- 用户说的词完全等于上面某个分类名 → 填 category，keyword 留空\n'
+            '- 否则 → 填 keyword，category 留空\n'
+            '- 两个不要同时填（会同时生效，漏掉结果）\n'
+            '\n'
+            '【最重要的一条，回答之前必须先做到】\n'
+            '上面说的"怎么回答"，前提是你手上已经有真数据。\n'
+            '用户只要提到商品、价格、分类、推荐、有没有某样东西，'
+            '你【必须先调用工具查库】，查完才能开口。\n'
+            '你不知道店里有什么。没查库之前，你说的每一句都是编的。\n'
         )
 
         # ①.5 取这个用户的历史（存在 Redis 里，key 带 user.id ⇒ 天然隔离）
@@ -818,7 +834,9 @@ class AiSearchView(APIView):
         qs = Product.objects.select_related('category')
 
         if keyword:      # 模型传了 keyword 才进这个分支
-            qs = qs.filter(Q(name__icontains=keyword) | Q(description__icontains=keyword))
+            qs = qs.filter(Q(name__icontains=keyword)
+                           | Q(description__icontains=keyword)
+                           | Q(category__name__iexact=keyword))
             '''
             Q(name__icontains=keyword) —— 商品名字里包含这个关键词（icontains = 不区分大小写的 LIKE '%keyword%'）
             Q(description__icontains=keyword) —— 或者描述里包含'''
@@ -903,7 +921,54 @@ class AiSearchView(APIView):
             return r.json()['choices'][0]['message']
         except Exception as e:
             raise RuntimeError(f'AI 调用失败：{e}')
-        '''
+
+    # ================流式电话线,不返回整段，一小块一小块 yield 出来===================
+    def _ask_stream(self,messages):
+        # 键名固定这几个：model / messages / max_tokens / temperature / stream
+        # 带 s 的两个：messages、max_tokens  ← 每次照抄，别凭手感
+        r = requests.post(
+            self.API,
+            headers={'Authorization':f'Bearer {settings.SILICONFLOW_API_KEY}'},
+            json={'model':self.MODEL,
+                  'messages':messages,
+                  'max_tokens':400,
+                  'temperature':0.2,
+                  'tools':self.TOOLS,
+                  'stream':True},   # ① 给模型的
+            stream=True,             # ② 给 requests 的
+            timeout=30,
+        )
+
+        for line in r.iter_lines():
+            # ① 空行跳过
+            if not line:
+                continue
+            # ② bytes 要 decode('utf-8')
+            line = line.decode('utf-8')
+            # ③ 必须以 'data:' 开头，否则跳过
+            if not line.startswith('data'):
+                continue
+            # ④ 去掉前缀 → strip() → 如果是 '[DONE]' 就 break
+            data_str = line[len('data:'):].strip()
+            if data_str == '[DONE]':
+                break
+            # ⑤ 否则 json.loads → 取 delta → 取 content
+            chunk = json.loads(data_str)
+            delta = chunk['choices'][0].get('delta',{})
+            content = delta.get('content')
+            # ⑥ content 有值就 yield
+            if content:
+                yield content
+
+def test_stream(request):
+    '''临时验证：Django 能不能一块一块吐数据'''
+    def gen():
+        for i in range(10):
+            yield f'第 {i} 块\n'
+            time.sleep(0.5)
+    return StreamingHttpResponse(gen(),content_type='text/plain; charset=utf-8')
+
+'''
         整个方法的工作过程:
         
         假设前端发来：
@@ -1015,3 +1080,159 @@ class AiSearchView(APIView):
         
         
         '''
+
+def test_ai_stream(request):
+    '''临时验证：AI 说的话能不能通过 Django 流出去'''
+    v = AiSearchView()
+    msgs = [{'role': 'user', 'content': '用三句话介绍一下零食'}]
+
+    def gen():
+        for piece in v._ask_stream(msgs):
+            yield piece
+    return StreamingHttpResponse(gen(), content_type='text/plain; charset=utf-8')
+
+class AiSearchStreamView(APIView):
+    '''流式版 AI 导购：边查边吐'''
+    # permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
+
+    # 复用 AiSearchView 的工具菜单、电话线、查询方法
+    TOOLS = AiSearchView.TOOLS
+    API = AiSearchView.API
+    MODEL = AiSearchView.MODEL
+    _search = AiSearchView._search
+    _list_categories = AiSearchView._list_categories
+    _ask = AiSearchView._ask
+    _ask_stream = AiSearchView._ask_stream
+
+    @staticmethod
+    def _sse(event,data):
+        '''拼一条 SSE 事件（注意：data 里的换行要逐行加前缀）'''
+        body = '\n'.join(f'data: {line}' for line in str(data).split('\n'))
+        return f'event:{event}\ndata:{data}\n\n'
+
+    def post(self,request):
+        question = (request.data.get('question') or '').strip()
+        if not question:
+            return Response({'code':400,'msg':'问题不能为空'})
+
+        sid = str(request.data.get('session_id') or 'default').strip()[:32] or 'deault'
+
+        # ⚠️ 校验放在流开始【之前】—— 一旦开始流，就没法再改状态码了
+        return StreamingHttpResponse(
+            self._gen(request.user.id,sid,question),
+            content_type='text/event-stream; charset=utf-8',
+        )
+
+    def _gen(self,user_id,sid,question):
+        try:
+            # ① 把"我库里有什么分类"告诉它 —— 不告诉，它就瞎猜
+            cats = list(Category.objects.values_list('name', flat=True))
+
+            system = (
+                f'你是零食商城的导购助手。本店商品分类只有这些：{cats}\n'
+                '你有两个工具：search_product（按关键词/分类/价格查商品）、'
+                'list_categories（查有哪些分类、各多少个）。\n'
+                '\n'
+                '【怎么回答问题】\n'
+                '前端会把商品渲染成卡片，名字和价格都在卡片上。\n'
+                '你只回一句话，不要逐条复述商品名和价格。\n'
+                '- 问"有什么/有哪些" → 一句话说这类东西，比如口味特点或价位\n'
+                '- 问"最便宜/最贵" → 直接说那一款叫什么、多少钱\n'
+                '- 问"多少钱" → 直接说价格\n'
+                '\n'
+                '【调哪个工具】\n'
+                '- 问"有哪些分类/卖什么种类/都有什么类别" → list_categories\n'
+                '- 问"XX分类里有哪些 / XX类有什么" → search_product，category 填那个分类名\n'
+                '- 其余商品问题（有什么零食、多少钱、推荐） → search_product\n'
+                '\n'
+                '【search_product 填什么参数】\n'
+                '- 用户说的词完全等于上面某个分类名 → 填 category，keyword 留空\n'
+                '- 否则 → 填 keyword，category 留空\n'
+                '- 两个不要同时填（会同时生效，漏掉结果）\n'
+                '\n'
+                '【最重要的一条，回答之前必须先做到】\n'
+                '上面说的"怎么回答"，前提是你手上已经有真数据。\n'
+                '用户只要提到商品、价格、分类、推荐、有没有某样东西，'
+                '你【必须先调用工具查库】，查完才能开口。\n'
+                '你不知道店里有什么。没查库之前，你说的每一句都是编的。\n'
+            )
+
+            # ①.5 取这个用户的历史（存在 Redis 里，key 带 user.id ⇒ 天然隔离）
+            # 会话号：前端传就按传的，没传就落到 default（旧调用不会坏）
+            cache_key = f'ai_history:{user_id}:{sid}'
+            history = cache.get(cache_key) or []
+
+            msgs = ([{'role': 'system', 'content': system}]
+                    + history
+                    + [{'role': 'user', 'content': question}])
+
+            # ② 分发表：工具名 → 方法（self. 已经绑定好了，可以直接调）
+            handlers = {
+                'search_product': self._search,
+                'list_categories': self._list_categories,
+            }
+
+            products = []  # 最后要交给前端的那份
+            total_count = 0  # ← 新增：符合条件的总数，前端显示"共 N 款"
+            sent = False                    # 商品卡片发过没有
+
+            # ③ 主循环：问 → 判 → 干 → 记
+            for i in range(1, 6):  # 最多 5 轮，保险丝
+                msg = self._ask(msgs)
+                calls = msg.get('tool_calls')
+
+                if not calls:  # 它答完了
+                    break   # ← 不需要工具了，退出
+
+                msgs.append(msg)  # 记：它这张单子
+
+                for call in calls:  # 一轮可能点好几道菜
+                    name = call['function']['name']
+                    args = json.loads(call['function']['arguments'])
+                    '''
+                    json.loads() — 字符串 → Python 对象
+                    json.load() — 文件对象 → Python 对象
+                    json.dumps() — Python 对象 → 字符串
+                    json.dump() — Python 对象 → 写入文件
+                    '''
+
+                    if name not in handlers:  # 模型点了个菜单上没有的
+                        result = {'error': f'没有这个工具：{name}'}
+                    else:
+                        result = handlers[name](**args)
+
+                    if isinstance(result, dict) and 'products' in result:
+                        products = result['products']
+                        total_count = result['total']
+
+                    msgs.append({'role': 'tool',
+                                'tool_call_id': call['id'],
+                                'content': json.dumps(result, ensure_ascii=False),})
+
+                # 这一轮跑完，有商品就发一张卡片
+                if products and not sent:
+                    yield self._sse('products',json.dumps(
+                        {'products':products,'total':total_count},
+                        ensure_ascii=False))
+                    sent = True
+
+            # ---------- ② 流式生成最终回答 ----------
+            answer = ''
+            for piece in self._ask_stream(msgs):
+                answer += piece
+                yield self._sse('text',piece)
+
+            # ---------- ③ 存历史（和 post() 一样） ----------
+            if answer:
+                msgs.append({'role':'assistant','content':answer})
+                turns = msgs[1:]
+                user_idx = [i for i,m in enumerate(turns) if m['role'] == 'user']
+                if len(user_idx) > 6:
+                    turns = turns[user_idx[-6]:]
+                cache.set(cache_key,turns,18000)
+
+        except Exception as e:
+            yield self._sse('error', json.dumps({'msg': str(e)}, ensure_ascii=False))
+        finally:
+            yield self._sse('done', '')
