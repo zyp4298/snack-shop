@@ -86,8 +86,6 @@ urlpatterns = [
     path('system/user/',views.SysUserInfoView.as_view()),
     path('snack/product/aiDescription', views.AiDescriptionView.as_view()),
     path('snack/product/aiSearch', views.AiSearchView.as_view()),
-    path('snack/product/testStream', views.test_stream),
-    path('snack/product/testAiStream', views.test_ai_stream),
     path('snack/product/aiSearchStream', views.AiSearchStreamView.as_view()),
 
 

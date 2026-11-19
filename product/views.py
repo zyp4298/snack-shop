@@ -960,14 +960,6 @@ class AiSearchView(APIView):
             if content:
                 yield content
 
-def test_stream(request):
-    '''临时验证：Django 能不能一块一块吐数据'''
-    def gen():
-        for i in range(10):
-            yield f'第 {i} 块\n'
-            time.sleep(0.5)
-    return StreamingHttpResponse(gen(),content_type='text/plain; charset=utf-8')
-
 '''
         整个方法的工作过程:
         
@@ -1081,20 +1073,10 @@ def test_stream(request):
         
         '''
 
-def test_ai_stream(request):
-    '''临时验证：AI 说的话能不能通过 Django 流出去'''
-    v = AiSearchView()
-    msgs = [{'role': 'user', 'content': '用三句话介绍一下零食'}]
-
-    def gen():
-        for piece in v._ask_stream(msgs):
-            yield piece
-    return StreamingHttpResponse(gen(), content_type='text/plain; charset=utf-8')
-
 class AiSearchStreamView(APIView):
     '''流式版 AI 导购：边查边吐'''
-    # permission_classes = [IsAuthenticated]
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
+    # permission_classes = [AllowAny]
 
     # 复用 AiSearchView 的工具菜单、电话线、查询方法
     TOOLS = AiSearchView.TOOLS
@@ -1109,14 +1091,14 @@ class AiSearchStreamView(APIView):
     def _sse(event,data):
         '''拼一条 SSE 事件（注意：data 里的换行要逐行加前缀）'''
         body = '\n'.join(f'data: {line}' for line in str(data).split('\n'))
-        return f'event:{event}\ndata:{data}\n\n'
+        return f'event:{event}\n{body}\n\n'
 
     def post(self,request):
         question = (request.data.get('question') or '').strip()
         if not question:
             return Response({'code':400,'msg':'问题不能为空'})
 
-        sid = str(request.data.get('session_id') or 'default').strip()[:32] or 'deault'
+        sid = str(request.data.get('session_id') or 'default').strip()[:32] or 'dfault'
 
         # ⚠️ 校验放在流开始【之前】—— 一旦开始流，就没法再改状态码了
         return StreamingHttpResponse(
@@ -1226,13 +1208,51 @@ class AiSearchStreamView(APIView):
             # ---------- ③ 存历史（和 post() 一样） ----------
             if answer:
                 msgs.append({'role':'assistant','content':answer})
-                turns = msgs[1:]
-                user_idx = [i for i,m in enumerate(turns) if m['role'] == 'user']
+                turns = msgs[1:]        # ③ 去掉 system
+                user_idx = [i for i,m in enumerate(turns) if m['role'] == 'user']       # ④ 找出所有"用户说话"的位置
                 if len(user_idx) > 6:
-                    turns = turns[user_idx[-6]:]
-                cache.set(cache_key,turns,18000)
+                    turns = turns[user_idx[-6]:]                # ⑥ 从倒数第 6 个 user 开始切
+                cache.set(cache_key,turns,1800)
 
         except Exception as e:
             yield self._sse('error', json.dumps({'msg': str(e)}, ensure_ascii=False))
         finally:
             yield self._sse('done', '')
+'''
+七步流水线
+① question ──── 一句话（前端传来的）
+     ↓ 拼 system + 历史
+② msgs ──────── 一坨列表（要发给模型的东西）
+     ↓ 问模型
+③ msg ───────── 一次回答（要么是"我要查库"，要么是"这是我的答案"）
+     ↓ 如果是"我要查库"
+④ result ────── 查库结果（字典：total/shown/products）
+     ↓ 如果里面有 products
+⑤ products ──── 给前端的卡片（立刻发出去）
+     ↓ 最后再流式问一次
+⑥ text ──────── 一个个字（边收边发）
+     ↓ 拼起来
+⑦ answer ────── 完整回答（存回 Redis，下次接着聊）
+=======================================================
+四层图
+┌─ ① 菜单层 ────────────────────────────────┐
+│  TOOLS = [...]                            │  ← 告诉模型"你能点这两道菜"
+│  说明书：名字、作用、参数                    │
+└──────────────────┬────────────────────────┘
+                   ↓ 随请求发出去
+┌─ ② 点单层 ────────────────────────────────┐
+│  calls = msg.get('tool_calls')            │  ← 模型说"我要查这个、还有这个"
+│  它只点单，不干活                           │
+└──────────────────┬────────────────────────┘
+                   ↓ 你的代码接手
+┌─ ③ 干活层 ────────────────────────────────┐
+│  handlers[name](**args)                   │  ← 查表找函数，真去查库
+│  handlers = {'名字': 函数对象}              │
+└──────────────────┬────────────────────────┘
+                   ↓
+┌─ ④ 汇报层 ────────────────────────────────┐
+│  msgs.append({'role':'tool',              │  ← 结果配好对，喂回去
+│               'tool_call_id': ...,        │
+│               'content': ...})            │
+└───────────────────────────────────────────┘
+'''
