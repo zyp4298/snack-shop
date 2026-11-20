@@ -1,12 +1,8 @@
-from pickle import FALSE
-from xmlrpc.client import Fault
 from rest_framework.decorators import action
 from django.shortcuts import render, HttpResponse
 from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Count
-from scripts.regsetup import description
-from sympy.abc import delta
 
 from product.models import Category, Product, Banner, Cart, Order, Address, OrderProduct
 from product.serializers import (CategorySerializer, ProductSerializer, CartSerializer,
